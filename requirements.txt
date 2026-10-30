@@ -1,0 +1,13 @@
+# netmon - Raspberry Pi network monitor
+#
+# Install with:  pip install -r requirements.txt
+# Tkinter is NOT a pip package on Raspberry Pi OS:  sudo apt install python3-tk
+
+icmplib>=3.0.3          # unprivileged ICMP echo (latency / loss / jitter)
+psutil>=5.9.0           # interface counters, TCP socket states
+PyYAML>=6.0             # config file
+
+# Optional - capacity ("bandwidth") measurement.
+# Only one is needed; iperf3 against a LAN server is far kinder to a Pi 3B+.
+speedtest-cli>=2.1.3    # method: speedtest
+# iperf3 is an apt package, not pip:  sudo apt install iperf3   (method: iperf3)

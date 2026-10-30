@@ -1,0 +1,84 @@
+# netmon configuration
+#
+# Every value here has a working default - delete anything you don't need.
+# Reload = restart. Validate with:  python -m netmon --selftest
+
+general:
+  # Interface to measure throughput/errors on. "auto" follows the default route.
+  interface: auto
+  db_path: ~/.local/share/netmon/netmon.db
+  # Raw 1 Hz samples are kept this long, then folded into per-minute rows.
+  # Keep this small: it is the only part that writes hard to the SD card.
+  raw_retention_hours: 6
+  # Per-minute rollups are kept this long (used for 24 h availability, trends).
+  retention_days: 30
+  # Samples held in RAM per series (180 @ 1 Hz = 3 min of detail on screen).
+  history_points: 1800
+
+# What to ping. "auto" resolves to the default gateway.
+# Exactly one target should be primary: it drives the big readouts.
+targets:
+  - { name: Gateway,  host: auto,     primary: false }
+  - { name: Internet, host: 1.1.1.1,  primary: true  }
+  - { name: DNS alt,  host: 8.8.8.8,  primary: false }
+
+probes:
+  ping:
+    interval: 1.0          # seconds between probe rounds (1 Hz = real-time feel)
+    count: 1               # echoes per round
+    echo_interval: 0.2     # gap between echoes when count > 1
+    timeout: 1.0
+    loss_window: 60        # rounds used for the rolling loss figure (60 = 1 min)
+    outage_after: 3        # consecutive failed rounds before it counts as an outage
+    backend: auto          # auto | icmplib | system
+    privileged: false      # false = unprivileged ICMP sockets (no root needed)
+
+  iface:
+    interval: 1.0          # throughput + error-rate sampling
+
+  tcp:
+    interval: 10.0
+    host: 1.1.1.1
+    port: 443
+    timeout: 3.0
+
+  bandwidth:
+    enabled: true
+    method: speedtest      # speedtest | iperf3 | none
+    interval: 3600.0       # a capacity test saturates the link - keep it rare
+    run_at_start: false
+    threads: 2             # speedtest: cap CPU/RAM on a Pi 3B+
+    iperf3_server: ""      # e.g. 192.168.1.50
+    iperf3_port: 5201
+    iperf3_duration: 5
+
+ui:
+  fullscreen: true
+  width: 800               # 5" DSI panels are usually 800x480
+  height: 480
+  refresh_ms: 500
+  hide_cursor: true
+  # Starting time window for the charts; tap the screen or press 1-4 to cycle.
+  window_seconds: 180
+  windows: [60, 180, 600, 1800]
+  # Fallback link capacity (Mbps) until a bandwidth test has run.
+  # Pi 3B+ note: its NIC shares the USB 2.0 bus, so ~300 Mbps is the ceiling.
+  link_capacity_mbps: 100
+
+thresholds:
+  latency_warn_ms: 40
+  latency_crit_ms: 120
+  jitter_warn_ms: 10
+  jitter_crit_ms: 30
+  loss_warn_pct: 1.0
+  loss_crit_pct: 5.0
+  tcp_warn_ms: 150
+  tcp_crit_ms: 500
+  # Interface errors+drops per second.
+  err_warn_rate: 1.0
+  err_crit_rate: 10.0
+  # Throughput as a share of measured capacity.
+  util_warn_pct: 70.0
+  util_crit_pct: 90.0
+  avail_warn_pct: 99.5
+  avail_crit_pct: 99.0
