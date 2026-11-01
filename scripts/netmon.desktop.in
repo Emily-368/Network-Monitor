@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=netmon dashboard
+Comment=Real-time network monitor
+Exec=__START__
+Terminal=false
+X-GNOME-Autostart-enabled=true
