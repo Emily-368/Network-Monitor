@@ -1,0 +1,206 @@
+"""Stdlib-only helpers: default-route discovery, formatting, light statistics."""
+
+from __future__ import annotations
+
+import socket
+import struct
+import time
+
+# --------------------------------------------------------------------------- #
+# Network facts straight from the kernel
+# --------------------------------------------------------------------------- #
+
+_ROUTE_FILE = "/proc/net/route"
+
+
+def default_route() -> tuple[str | None, str | None]:
+    """Return ``(interface, gateway_ip)`` for the lowest-metric default route.
+
+    Returns ``(None, None)`` off Linux or when there is no default route.
+    """
+    try:
+        with open(_ROUTE_FILE, "r", encoding="ascii") as fh:
+            lines = fh.read().splitlines()[1:]
+    except OSError:
+        return (None, None)
+
+    best: tuple[int, str, str] | None = None
+    for line in lines:
+        f = line.split()
+        # iface dest gateway flags refcnt use metric mask mtu window irtt
+        if len(f) < 8 or f[1] != "00000000":
+            continue
+        try:
+            metric = int(f[6])
+            gw = socket.inet_ntoa(struct.pack("<L", int(f[2], 16)))
+        except (ValueError, struct.error, OSError):
+            continue
+        if gw == "0.0.0.0":
+            continue
+        if best is None or metric < best[0]:
+            best = (metric, f[0], gw)
+    return (best[1], best[2]) if best else (None, None)
+
+
+def pick_interface(preferred: str = "auto") -> str | None:
+    """Resolve the interface to measure. Falls back to the first up, non-loopback NIC."""
+    if preferred and preferred != "auto":
+        return preferred
+
+    iface, _ = default_route()
+    if iface:
+        return iface
+
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        stats = psutil.net_if_stats()
+    except OSError:
+        return None
+    for name, st in stats.items():
+        if st.isup and not name.startswith(("lo", "docker", "veth", "br-")):
+            return name
+    return None
+
+
+def host_uptime() -> float | None:
+    """Seconds since boot, or ``None`` where /proc is not available."""
+    try:
+        with open("/proc/uptime", "r", encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_tcp_snmp() -> dict[str, int]:
+    """Kernel-wide TCP counters from /proc/net/snmp (``RetransSegs``, ``OutSegs``, ...)."""
+    try:
+        with open("/proc/net/snmp", "r", encoding="ascii") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+
+    for i in range(0, len(lines) - 1, 2):
+        head, body = lines[i], lines[i + 1]
+        if not head.startswith("Tcp:"):
+            continue
+        keys = head.split()[1:]
+        vals = body.split()[1:]
+        out = {}
+        for k, v in zip(keys, vals):
+            try:
+                out[k] = int(v)
+            except ValueError:
+                pass
+        return out
+    return {}
+
+
+# --------------------------------------------------------------------------- #
+# Formatting - the dashboard is 800x480, so every string is kept short
+# --------------------------------------------------------------------------- #
+
+
+def fmt_ms(value: float | None, digits: int = 1) -> str:
+    if value is None:
+        return "--"
+    if value >= 1000:
+        return f"{value / 1000:.2f}s"
+    if value >= 100:
+        digits = 0
+    return f"{value:.{digits}f}"
+
+
+def fmt_mbps(value: float | None) -> str:
+    if value is None:
+        return "--"
+    if value >= 100:
+        return f"{value:.0f}"
+    if value >= 10:
+        return f"{value:.1f}"
+    if value >= 1:
+        return f"{value:.2f}"
+    if value <= 0:
+        return "0"
+    return f"{value:.3f}"
+
+
+def fmt_pct(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "--"
+    if value == 0:
+        return "0"
+    return f"{value:.{digits}f}"
+
+
+def fmt_avail(value: float | None) -> str:
+    """Availability needs its decimals: 99.974 % is four outage-minutes a day,
+    and rounding it to 100 % hides exactly the thing being watched."""
+    if value is None:
+        return "--"
+    if value >= 99.9995:
+        return "100"
+    if value < 90:
+        return f"{value:.1f}"
+    return f"{value:.3f}"
+
+
+def fmt_duration(seconds: float | None, short: bool = True) -> str:
+    """``3d 4h`` / ``4h 12m`` / ``12m 05s`` / ``45s``."""
+    if seconds is None:
+        return "--"
+    s = int(max(0, seconds))
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s" if not short else f"{m}m{s:02d}"
+    return f"{s}s"
+
+
+def fmt_rate(value: float | None) -> str:
+    if value is None:
+        return "--"
+    if value == 0:
+        return "0"
+    if value < 1:
+        return f"{value:.2f}"
+    return f"{value:.1f}"
+
+
+def fmt_clock(ts: float | None = None) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts if ts is not None else time.time()))
+
+
+# --------------------------------------------------------------------------- #
+# Statistics without numpy
+# --------------------------------------------------------------------------- #
+
+
+def percentile(values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile. ``pct`` is 0-100."""
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    k = (len(vals) - 1) * (pct / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(vals) - 1)
+    frac = k - lo
+    return vals[lo] * (1 - frac) + vals[hi] * frac
+
+
+def mean(values: list[float]) -> float | None:
+    vals = [v for v in values if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return low if value < low else (high if value > high else value)
