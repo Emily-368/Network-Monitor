@@ -1,0 +1,29 @@
+# Dashboard (which also collects) as a user service.
+#
+# Only needed if you would rather not use the autostart .desktop entry that
+# scripts/install.sh creates. It requires a graphical session to already be
+# running - enable desktop autologin first (raspi-config > System Options >
+# Boot / Auto Login > Desktop Autologin).
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/netmon-dashboard.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now netmon-dashboard
+#
+# Do not also enable netmon-collector: this process collects too.
+
+[Unit]
+Description=netmon dashboard
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/netmon
+Environment=DISPLAY=:0
+ExecStart=%h/netmon/scripts/start-dashboard.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

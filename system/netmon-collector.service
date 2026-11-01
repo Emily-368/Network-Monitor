@@ -1,0 +1,34 @@
+# Collector only - no display. Use this on a Pi with no panel attached, or
+# when you want history collected even while the desktop is logged out.
+#
+#   sudo cp systemd/netmon-collector.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now netmon-collector
+#
+# IMPORTANT: do not run this at the same time as the dashboard. The dashboard
+# process collects as well, so both running means every target is probed twice
+# and both processes write to the same SQLite file.
+
+[Unit]
+Description=netmon network monitor (collector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/netmon
+ExecStart=/home/pi/netmon/.venv/bin/python -m netmon --headless
+Restart=always
+RestartSec=10
+# No root needed: ICMP goes through unprivileged datagram sockets.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/.local/share/netmon
+PrivateTmp=true
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
