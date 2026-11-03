@@ -1,6 +1,6 @@
 """The dashboard itself.
 
-Layout, for a 5" 800x480 SPI panel:
+Layout, for the 5" 800x480 DSI panel (DFRobot DFR0550-V2):
 
     +----------------------------------------------------------------+
     | host/iface   | VERDICT (what is wrong and whose problem) | clock |
@@ -19,9 +19,6 @@ the rest are compact readouts. Every charted value is also in the table, so the
 screen is readable when the TFT's viewing angle washes the colours out.
 
 Tap the header for the touch menu; tap anywhere else to change the time window.
-
-An SPI panel updates slowly, so drawing is rationed: text is only touched when it
-changes, and charts redraw every few refreshes. See ui.refresh_ms and ui.chart_every.
 
 Bandwidth vs throughput sits in one tile on purpose. Both are Mbps, so they
 share a single axis - throughput is the line, capacity is the dashed reference,
@@ -46,7 +43,7 @@ log = logging.getLogger(__name__)
 
 MENU_TIMEOUT_MS = 15000     # an unattended kiosk must not stay stuck on the menu
 NIC_LIMIT = 0.9             # a result this close to link speed measured the Pi
-TAP_DEBOUNCE_S = 0.6        # resistive SPI touch bounces, and a slow screen invites double taps
+TAP_DEBOUNCE_S = 0.6        # one finger should not count as two taps
 
 
 def _fmt_window(seconds: int) -> str:
@@ -88,8 +85,6 @@ class Dashboard:
         self.gap_tcp = cfg.probes.tcp.interval * 2.5
         self.gap_dns = cfg.probes.dns.interval * 2.5
         self._menu_after = None
-        self._tick = 0
-        self._charts_due = True
         self._last_tap = float("-inf")
 
         root.configure(bg=T.PAGE)
@@ -285,7 +280,7 @@ class Dashboard:
 
     def set_window(self, seconds: int) -> None:
         self.window_s = seconds
-        self.refresh(force_charts=True)
+        self.refresh()
 
     def cycle_window(self, step: int = 1) -> None:
         try:
@@ -324,7 +319,7 @@ class Dashboard:
         # Once the event loop is running, so the charts have a size to draw into.
         self._after_id = self.root.after(200, self.refresh)
 
-    def refresh(self, force_charts: bool = False) -> None:
+    def refresh(self) -> None:
         if self._closing:
             return
         # Called on a tap as well as by the timer: there must only ever be one
@@ -332,8 +327,6 @@ class Dashboard:
         if self._after_id is not None:
             self.root.after_cancel(self._after_id)
             self._after_id = None
-        self._charts_due = force_charts or self._tick % self.cfg.ui.chart_every == 0
-        self._tick += 1
         try:
             snap = self.state.snapshot(self.window_s)
             self._render(snap)
@@ -345,10 +338,6 @@ class Dashboard:
             self._after_id = self.root.after(self.cfg.ui.refresh_ms, self.refresh)
 
     # -- rendering ------------------------------------------------------ #
-
-    def _draw(self, chart, *args, **kwargs) -> None:
-        if self._charts_due:
-            chart.draw(*args, **kwargs)
 
     def _render(self, snap: dict) -> None:
         now = snap["now"]
@@ -408,8 +397,8 @@ class Dashboard:
             aux=f"{p.get('name', '')}",
         )
         lost_ts = [t for t, l in zip(p["ts"], p["lost_series"]) if l > 0]
-        self._draw(
-            self.c_latency, [p["ts"]], [p["rtt_series"]], t0, t1,
+        self.c_latency.draw(
+            [p["ts"]], [p["rtt_series"]], t0, t1,
             y_floor=max(10.0, th.latency_warn_ms / 2),
             fmt=lambda v: f"{v:g}", lost_ts=lost_ts, max_gap_s=self.gap_ping,
             spans=spans,
@@ -433,9 +422,8 @@ class Dashboard:
             aux="rolling 60s",
         )
         values = [l * 100.0 for l in p["lost_series"]]
-        self._draw(self.c_loss, p["ts"], values, t0, t1,
-                   y_floor=max(1.0, th.loss_warn_pct),
-                   fmt=lambda v: f"{v:g}%", spans=spans)
+        self.c_loss.draw(p["ts"], values, t0, t1, y_floor=max(1.0, th.loss_warn_pct),
+                         fmt=lambda v: f"{v:g}%", spans=spans)
 
     def _render_bandwidth(self, iface, bw, t0, t1, stale, spans) -> None:
         """Throughput (live, 1 Hz) against measured capacity (hourly)."""
@@ -474,8 +462,7 @@ class Dashboard:
             cap_text = f"no test yet, assuming {fmt_mbps(fallback)}"
 
         tile.set_value(fmt_mbps(rx), sub=cap_text, aux=f"↑ {fmt_mbps(tx)}")
-        self._draw(
-            self.c_bw,
+        self.c_bw.draw(
             [iface["ts"], iface["ts"]],
             [iface["rx_series"], iface["tx_series"]],
             t0, t1,
@@ -497,7 +484,7 @@ class Dashboard:
 
         in_pct, in_txt = share(rx, cap_ref)
         out_pct, out_txt = share(tx, cap_up or cap_ref)
-        self._draw(self.m_bw, [in_pct, out_pct], [in_txt, out_txt])
+        self.m_bw.draw([in_pct, out_pct], [in_txt, out_txt])
 
     def _render_compact(self, p, iface, tcp, snap, t0, t1, stale) -> None:
         th = self.th
@@ -511,9 +498,9 @@ class Dashboard:
             self.t_jitter.set_level(lv, show_text=False)
             self.t_jitter.set_value(fmt_ms(p.get("jitter")),
                                     sub=f"peak {fmt_ms(p.get('jitter_max'))} ms")
-            self._draw(self.c_jitter, [p["ts"]], [p["jitter_series"]], t0, t1,
-                       y_floor=max(2.0, th.jitter_warn_ms / 2),
-                       max_gap_s=self.gap_ping)
+            self.c_jitter.draw([p["ts"]], [p["jitter_series"]], t0, t1,
+                               y_floor=max(2.0, th.jitter_warn_ms / 2),
+                               max_gap_s=self.gap_ping)
 
         # TCP handshake
         if stale:
@@ -527,8 +514,8 @@ class Dashboard:
             retrans = tcp.get("retrans_pct")
             self.t_tcp.set_value(fmt_ms(tcp.get("connect_ms")),
                                  sub=f"retrans {fmt_pct(retrans)}%")
-            self._draw(self.c_tcp, [tcp["ts"]], [tcp["connect_series"]], t0, t1,
-                       y_floor=50.0, max_gap_s=self.gap_tcp)
+            self.c_tcp.draw([tcp["ts"]], [tcp["connect_series"]], t0, t1,
+                            y_floor=50.0, max_gap_s=self.gap_tcp)
 
         # DNS lookup
         dns = snap["dns"]
@@ -543,8 +530,8 @@ class Dashboard:
                                  show_text=False)
             self.t_dns.set_value(fmt_ms(dns["ms"]),
                                  sub=f"failed {dns['fails']} of {dns['attempts']}")
-            self._draw(self.c_dns, [dns["ts"]], [dns["series"]], t0, t1,
-                       y_floor=50.0, max_gap_s=self.gap_dns)
+            self.c_dns.draw([dns["ts"]], [dns["series"]], t0, t1,
+                            y_floor=50.0, max_gap_s=self.gap_dns)
 
         # The link itself, and the errors on it
         self._render_link(iface, stale)
@@ -673,7 +660,7 @@ def run_dashboard(cfg, state, collector=None) -> None:
     """Create the Tk root, run the dashboard, and return when the window closes."""
     root = tk.Tk()
     root.geometry(f"{cfg.ui.width}x{cfg.ui.height}")
-    # Many SPI panels are lower resolution than this layout, and X will not say so.
+    # A smaller panel would just clip the layout, with no error to say why.
     screen = (root.winfo_screenwidth(), root.winfo_screenheight())
     if screen[0] < cfg.ui.width or screen[1] < cfg.ui.height:
         log.warning("screen is %dx%d but the layout needs %dx%d: text will be cut off",

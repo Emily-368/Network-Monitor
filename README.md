@@ -1,11 +1,12 @@
 # netmon
 
-A real-time network monitor for a Raspberry Pi 3B with a 5" 800x480 SPI TFT.
+A real-time network monitor for a Raspberry Pi 3B with a DFRobot DFR0550-V2, a 5"
+800x480 DSI touchscreen.
 Python, Tkinter, SQLite. No browser, no Grafana, no Docker — it has to live
 inside 1 GB of RAM and leave the link it is measuring alone.
 
 ```
-raspberrypi · eth0                ● ONLINE                             3m  16:43
+raspberrypi · eth0                ● ONLINE                          3m  16:43:49
 192.168.1.50                  Internet (1.1.1.1)
 ┌── LATENCY ──────── OK ─┬── PACKET LOSS ──── OK ─┬── THROUGHPUT ───────────── OK ─┐
 │ 18.8 ms      Internet  │ 1.67 %     rolling 60s │ 0.781 Mbps in          ↑ 0.621 │
@@ -32,12 +33,6 @@ On the Pi:
 
 ```bash
 git clone <this repo> ~/netmon && cd ~/netmon && bash scripts/install.sh
-```
-
-For the SPI panel, add `--spi-display` (see [The SPI panel](#the-spi-panel)):
-
-```bash
-bash scripts/install.sh --spi-display
 ```
 
 The installer is idempotent. It installs `python3-tk`, builds a virtualenv,
@@ -288,28 +283,17 @@ zero.
 
 ---
 
-## The SPI panel
+## The display
 
-SPI is slow: at 32 MHz a full 800x480 frame takes about 0.2 s to send, whatever the
-Pi's speed. So netmon rations what it draws, without measuring any less often:
+The DFRobot DFR0550-V2 is a 5" 800x480 IPS panel with 5-point capacitive touch. It
+connects with the supplied ribbon cable to the Pi's DISPLAY (DSI) port and draws its
+power from the Pi. Set the backlight with the small dial on the back of the panel.
 
-* numbers update every 2 s (`ui.refresh_ms`) and only repaint if they changed;
-* charts, which change the most pixels, redraw every 6 s (`ui.chart_every`);
-* probes still run at 1 Hz, so a one-second spike is in the charts, just shown a
-  little later. A tap redraws straight away.
-
-**Setup.** The panel's `dtoverlay` line in `/boot/firmware/config.txt` comes from its
-vendor and is the one thing netmon cannot do for you. Add it, reboot, then run
-`bash scripts/install.sh --spi-display`. That enables SPI, selects X11 (Wayland
-desktops need a DRM device, which an fbtft panel does not provide) and points X at
-`/dev/fb1`, then reboot again. `python -m netmon --selftest` lists the framebuffers
-it can see and the session type.
+netmon only needs a desktop session at 800x480. `python -m netmon --selftest` lists
+the framebuffers it can see and the session type.
 
 | Symptom | Cause |
 |---|---|
-| panel stays white or blank | overlay not loaded: no `fb1` in `--selftest`; check `dmesg \| grep -i fb` |
-| dashboard appears on HDMI, not the panel | `/dev/fb1` did not exist when the installer ran: run it again |
-| `screen is ...x... but the layout needs` in the log | the panel is smaller than 800x480, and the layout will not fit |
-| panel looks torn or laggy | raise `spi` speed in the overlay if the panel allows it, or raise `ui.chart_every` |
-| taps land in the wrong place | touch needs calibrating or rotating to match the panel: see the vendor's notes |
-| high CPU, or pings slower than expected | an `fbcp` copy process is running; it is not needed with `--spi-display` |
+| panel stays blank | check the ribbon at both ends; DFRobot publishes no `config.txt` lines for the V2 |
+| touch weak or not responding | check the power supply, and that the resolution is 800x480; DFRobot's FAQ also suggests trying an older OS |
+| `screen is ...x... but the layout needs` in the log | the desktop is not running at 800x480: check the display settings |

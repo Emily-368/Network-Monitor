@@ -124,10 +124,7 @@ def read_cpu_temp() -> float | None:
 
 
 def list_framebuffers() -> list[str]:
-    """Framebuffers the kernel knows about, as ``fb1 fb_ili9486 800x480``.
-
-    An fbtft SPI panel normally appears as a second framebuffer, /dev/fb1.
-    """
+    """Framebuffers the kernel knows about, as ``fb0 vc4drmfb 800x480``."""
     out = []
     for path in sorted(glob.glob("/sys/class/graphics/fb[0-9]*")):
         try:
@@ -251,8 +248,7 @@ def fmt_rate(value: float | None) -> str:
 
 
 def fmt_clock(ts: float | None = None) -> str:
-    """No seconds: a digit that changes every refresh is wasted SPI bandwidth."""
-    return time.strftime("%H:%M", time.localtime(ts if ts is not None else time.time()))
+    return time.strftime("%H:%M:%S", time.localtime(ts if ts is not None else time.time()))
 
 
 # --------------------------------------------------------------------------- #

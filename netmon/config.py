@@ -99,8 +99,7 @@ class UiCfg:
     fullscreen: bool = True
     width: int = 800
     height: int = 480
-    refresh_ms: int = 2000
-    chart_every: int = 3
+    refresh_ms: int = 1000
     hide_cursor: bool = True
     window_seconds: int = 180
     windows: list = field(default_factory=lambda: [60, 180, 600, 1800])
@@ -284,7 +283,6 @@ def load_config(explicit: str | None = None) -> Config:
     cfg.general.raw_retention_hours = max(0.5, float(cfg.general.raw_retention_hours))
     cfg.general.history_points = max(60, int(cfg.general.history_points))
     cfg.ui.refresh_ms = max(100, int(cfg.ui.refresh_ms))
-    cfg.ui.chart_every = max(1, int(cfg.ui.chart_every))
     if not cfg.ui.windows:
         cfg.ui.windows = [60, 180, 600, 1800]
     cfg.ui.windows = sorted({int(w) for w in cfg.ui.windows if int(w) > 0})

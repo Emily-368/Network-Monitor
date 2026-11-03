@@ -65,13 +65,9 @@ probes:
 
 ui:
   fullscreen: true
-  width: 800               # the layout needs at least 800x480
+  width: 800               # DFR0550-V2 panel; the layout needs at least 800x480
   height: 480
-  # An SPI panel is slow to update, so draw as little as possible. Numbers update
-  # every refresh_ms; charts, which change the most pixels, every chart_every
-  # refreshes (2 s x 3 = 6 s). Measurement stays at 1 Hz either way.
-  refresh_ms: 2000
-  chart_every: 3
+  refresh_ms: 1000         # the probes run at 1 Hz; redrawing faster shows nothing new
   hide_cursor: true
   # Starting time window for the charts; tap the screen or press 1-4 to cycle.
   window_seconds: 180
