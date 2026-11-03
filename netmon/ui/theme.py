@@ -30,11 +30,11 @@ SERIES = {
     "blue": "#3987e5",      # slot 1 - latency, download/rx
     "orange": "#d95926",    # slot 2 - upload/tx
     "aqua": "#199e70",      # slot 3 - jitter
-    "yellow": "#c98500",    # slot 4
+    "yellow": "#c98500",    # slot 4 - DNS lookup
     "magenta": "#d55181",   # slot 5
     "green": "#008300",     # slot 6
     "violet": "#9085e9",    # slot 7 - TCP connect
-    "red": "#e66767",       # slot 8 - interface errors
+    "red": "#e66767",       # slot 8
 }
 
 # -- reserved status palette (never used for a series) ---------------------- #
@@ -159,17 +159,21 @@ class Theme:
             return -max(7, int(round(size * scale)))
 
         # Negative sizes are pixels in Tk, which keeps the layout predictable
-        # across the Pi's DPI reporting.
+        # across the Pi's DPI reporting. A 5" 800x480 panel is about 186 ppi, so
+        # 12 px is under 2 mm tall: nothing that must be read goes below that.
         self.hero = (sans, px(36), "bold")
         self.hero_sm = (sans, px(23), "bold")
-        self.hero_xs = (sans, px(18), "bold")
+        self.hero_xs = (sans, px(22), "bold")
         self.unit = (sans, px(12), "normal")
-        self.title = (sans, px(11), "bold")
-        self.label = (sans, px(10), "normal")
-        self.sub = (sans, px(11), "normal")
-        self.chip = (sans, px(10), "bold")
-        self.tick = (mono, px(9), "normal")
-        self.table = (mono, px(11), "normal")
-        self.table_head = (mono, px(10), "bold")
-        self.clock = (mono, px(14), "bold")
-        self.brand = (sans, px(15), "bold")
+        self.title = (sans, px(12), "bold")
+        self.label = (sans, px(12), "normal")
+        self.sub = (sans, px(12), "normal")
+        self.chip = (sans, px(12), "bold")
+        self.tick = (mono, px(10), "normal")
+        self.table = (mono, px(13), "normal")
+        self.table_head = (mono, px(12), "bold")
+        self.clock = (mono, px(18), "bold")
+        self.host = (sans, px(13), "bold")
+        self.address = (mono, px(15), "bold")
+        self.verdict = (sans, px(16), "bold")
+        self.menu = (sans, px(16), "bold")

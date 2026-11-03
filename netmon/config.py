@@ -50,10 +50,23 @@ class TcpCfg:
 
 
 @dataclass
+class DnsCfg:
+    enabled: bool = True
+    interval: float = 15.0
+    host: str = "cloudflare.com"
+    timeout: float = 3.0
+
+
+@dataclass
+class SystemCfg:
+    interval: float = 10.0
+
+
+@dataclass
 class BandwidthCfg:
     enabled: bool = True
     method: str = "speedtest"   # speedtest | iperf3 | none
-    interval: float = 3600.0
+    interval: float = 86400.0
     run_at_start: bool = False
     threads: int = 2
     iperf3_server: str = ""
@@ -66,6 +79,8 @@ class ProbesCfg:
     ping: PingCfg = field(default_factory=PingCfg)
     iface: IfaceCfg = field(default_factory=IfaceCfg)
     tcp: TcpCfg = field(default_factory=TcpCfg)
+    dns: DnsCfg = field(default_factory=DnsCfg)
+    system: SystemCfg = field(default_factory=SystemCfg)
     bandwidth: BandwidthCfg = field(default_factory=BandwidthCfg)
 
 
@@ -84,7 +99,7 @@ class UiCfg:
     fullscreen: bool = True
     width: int = 800
     height: int = 480
-    refresh_ms: int = 500
+    refresh_ms: int = 1000
     hide_cursor: bool = True
     window_seconds: int = 180
     windows: list = field(default_factory=lambda: [60, 180, 600, 1800])
@@ -97,7 +112,7 @@ class Thresholds:
     latency_crit_ms: float = 120.0
     jitter_warn_ms: float = 10.0
     jitter_crit_ms: float = 30.0
-    loss_warn_pct: float = 1.0
+    loss_warn_pct: float = 2.0
     loss_crit_pct: float = 5.0
     tcp_warn_ms: float = 150.0
     tcp_crit_ms: float = 500.0
@@ -107,6 +122,10 @@ class Thresholds:
     util_crit_pct: float = 90.0
     avail_warn_pct: float = 99.5
     avail_crit_pct: float = 99.0
+    signal_warn_dbm: float = -70.0
+    signal_crit_dbm: float = -80.0
+    temp_warn_c: float = 70.0
+    temp_crit_c: float = 80.0
 
 
 @dataclass
@@ -236,10 +255,12 @@ def load_config(explicit: str | None = None) -> Config:
         ping=_section(PingCfg, probes_raw.get("ping"), "probes.ping."),
         iface=_section(IfaceCfg, probes_raw.get("iface"), "probes.iface."),
         tcp=_section(TcpCfg, probes_raw.get("tcp"), "probes.tcp."),
+        dns=_section(DnsCfg, probes_raw.get("dns"), "probes.dns."),
+        system=_section(SystemCfg, probes_raw.get("system"), "probes.system."),
         bandwidth=_section(BandwidthCfg, probes_raw.get("bandwidth"), "probes.bandwidth."),
     )
     for key in probes_raw:
-        if key not in {"ping", "iface", "tcp", "bandwidth"}:
+        if key not in {"ping", "iface", "tcp", "dns", "system", "bandwidth"}:
             log.warning("config: ignoring unknown probe %r", key)
 
     cfg = Config(
@@ -251,11 +272,13 @@ def load_config(explicit: str | None = None) -> Config:
         source_path=str(path),
     )
 
-    # Guard rails: a 0.05 s ping interval would melt a Pi 3B+, and raw retention
+    # Guard rails: a 0.05 s ping interval would melt a Pi 3B, and raw retention
     # shorter than the rollup cadence would lose samples before they are folded.
     cfg.probes.ping.interval = max(0.25, float(cfg.probes.ping.interval))
     cfg.probes.iface.interval = max(0.25, float(cfg.probes.iface.interval))
     cfg.probes.tcp.interval = max(1.0, float(cfg.probes.tcp.interval))
+    cfg.probes.dns.interval = max(5.0, float(cfg.probes.dns.interval))
+    cfg.probes.system.interval = max(1.0, float(cfg.probes.system.interval))
     cfg.probes.bandwidth.interval = max(60.0, float(cfg.probes.bandwidth.interval))
     cfg.general.raw_retention_hours = max(0.5, float(cfg.general.raw_retention_hours))
     cfg.general.history_points = max(60, int(cfg.general.history_points))

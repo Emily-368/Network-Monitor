@@ -8,6 +8,9 @@ never delays a fast one (the 1 Hz ping round).
 from .ping import PingProbe
 from .iface import IfaceProbe
 from .tcp import TcpProbe
+from .dns import DnsProbe
+from .system import SystemProbe
 from .bandwidth import BandwidthProbe
 
-__all__ = ["PingProbe", "IfaceProbe", "TcpProbe", "BandwidthProbe"]
+__all__ = ["PingProbe", "IfaceProbe", "TcpProbe", "DnsProbe", "SystemProbe",
+           "BandwidthProbe"]

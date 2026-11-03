@@ -1,29 +1,19 @@
-"""TCP health: handshake time, retransmission rate, socket states.
+"""TCP health: handshake time and retransmission rate.
 
 Ping tells you about the ICMP path; it does not tell you whether TCP actually
-works across it. Three different things are measured here:
+works across it. Two different things are measured here:
 
   * **connect time** - a real SYN/SYN-ACK/ACK handshake to a host:port, timed.
     Catches middleboxes, DPI and port blocking that ICMP sails straight past.
   * **retransmission rate** - ``RetransSegs`` as a share of ``OutSegs`` from
     /proc/net/snmp, sampled as a delta. This is the kernel's own view of loss,
     and it reflects every TCP connection on the Pi, not just the probe.
-  * **socket states** - how many connections are ESTABLISHED / TIME_WAIT.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
-
-log = logging.getLogger(__name__)
-
-try:
-    import psutil
-    HAVE_PSUTIL = True
-except ImportError:  # pragma: no cover
-    HAVE_PSUTIL = False
 
 from ..util import read_tcp_snmp
 
@@ -38,7 +28,6 @@ class TcpProbe:
         self.storage = storage
         self.interval = self.tcfg.interval
         self._prev_snmp: dict[str, int] | None = None
-        self._states_denied = False
 
         with state.lock:
             state.tcp.host = self.tcfg.host
@@ -86,41 +75,23 @@ class TcpProbe:
             return None
         return 100.0 * retrans / out
 
-    def _socket_states(self) -> tuple[int | None, int | None]:
-        if not HAVE_PSUTIL or self._states_denied:
-            return (None, None)
-        try:
-            conns = psutil.net_connections(kind="tcp")
-        except (psutil.AccessDenied, PermissionError):
-            self._states_denied = True
-            log.info("TCP socket states need more privileges than we have - skipping")
-            return (None, None)
-        except (OSError, RuntimeError):
-            return (None, None)
-        est = sum(1 for c in conns if c.status == "ESTABLISHED")
-        tw = sum(1 for c in conns if c.status == "TIME_WAIT")
-        return (est, tw)
-
     # -- round -------------------------------------------------------------- #
 
     async def tick(self) -> None:
         connect_ms, err = await self._handshake()
         retrans = self._retrans_pct()
-        est, tw = self._socket_states()
         now = time.time()
 
         with self.state.lock:
             st = self.state.tcp
             st.connect.add(now, connect_ms)
             st.retrans_pct = retrans
-            st.established = est
-            st.time_wait = tw
             st.attempts += 1
             st.last_error = err
             if connect_ms is None:
                 st.fails += 1
 
         self.storage.add_tcp(now, self.tcfg.host, int(self.tcfg.port), connect_ms,
-                             connect_ms is not None, retrans, est)
+                             connect_ms is not None, retrans)
         if err:
             self.state.note_error(f"tcp {self.tcfg.host}:{self.tcfg.port}: {err}")

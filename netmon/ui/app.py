@@ -1,20 +1,24 @@
 """The dashboard itself.
 
-Layout, for an 800x480 DSI panel (it scales to any size, but that is the target):
+Layout, for a 5" 800x480 panel (it scales to any size, but that is the target):
 
     +----------------------------------------------------------------+
-    | NETMON  host/iface   | PRIMARY TARGET + STATE |  window  clock |
+    | host/iface   | VERDICT (what is wrong and whose problem) | clock |
+    | IP address   | detail                                    |       |
     +------------------+------------------+--------------------------+
-    | LATENCY          | PACKET LOSS      | BANDWIDTH vs THROUGHPUT  |
+    | LATENCY          | PACKET LOSS      | THROUGHPUT vs capacity   |
     +------------------+------------------+--------------------------+
-    | JITTER | TCP | ERRORS | AVAILABILITY | UPTIME                  |
+    | JITTER | TCP | DNS | LINK + errors | AVAILABILITY              |
     +----------------------------------------------------------------+
-    | per-target table + footer                                      |
+    | TARGETS                                         Pi temp / power |
+    | per-target table + latest event                                |
     +----------------------------------------------------------------+
 
 The three real-time-sensitive metrics get the top row and the full chart width;
 the rest are compact readouts. Every charted value is also in the table, so the
 screen is readable when the TFT's viewing angle washes the colours out.
+
+Tap the header for the touch menu; tap anywhere else to change the time window.
 
 Bandwidth vs throughput sits in one tile on purpose. Both are Mbps, so they
 share a single axis - throughput is the line, capacity is the dashed reference,
@@ -29,12 +33,16 @@ import tkinter as tk
 
 from ..util import (fmt_avail, fmt_clock, fmt_duration, fmt_mbps, fmt_ms,
                     fmt_pct, fmt_rate)
+from ..verdict import diagnose
 from . import theme as T
 from .theme import Theme
 from .widgets import (BarChart, CapacityMeter, LineChart, Panel, StatRow,
                       TargetTable, Tile)
 
 log = logging.getLogger(__name__)
+
+MENU_TIMEOUT_MS = 15000     # an unattended kiosk must not stay stuck on the menu
+NIC_LIMIT = 0.9             # a result this close to link speed measured the Pi
 
 
 def _fmt_window(seconds: int) -> str:
@@ -74,10 +82,13 @@ class Dashboard:
         self.gap_ping = cfg.probes.ping.interval * 3.0
         self.gap_iface = cfg.probes.iface.interval * 3.0
         self.gap_tcp = cfg.probes.tcp.interval * 2.5
+        self.gap_dns = cfg.probes.dns.interval * 2.5
+        self._menu_after = None
 
         root.configure(bg=T.PAGE)
         root.title("netmon")
         self._build()
+        self._build_menu()
         self._bind_keys()
 
     # ------------------------------------------------------------------ #
@@ -88,28 +99,39 @@ class Dashboard:
         th = self.theme
         outer = tk.Frame(self.root, bg=T.PAGE)
         outer.pack(fill="both", expand=True, padx=4, pady=4)
-        outer.grid_rowconfigure(0, minsize=28, weight=0)
-        outer.grid_rowconfigure(1, weight=5, minsize=150)
-        outer.grid_rowconfigure(2, minsize=84, weight=0)
-        outer.grid_rowconfigure(3, weight=4, minsize=126)
+        # The charts take whatever the fixed-height rows leave over.
+        outer.grid_rowconfigure(0, weight=0)
+        outer.grid_rowconfigure(1, weight=1, minsize=150)
+        outer.grid_rowconfigure(2, weight=0)
+        outer.grid_rowconfigure(3, weight=0)
         outer.grid_columnconfigure(0, weight=1)
 
         # -- header ----------------------------------------------------- #
         head = tk.Frame(outer, bg=T.PAGE)
+        self.head = head
         head.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
         head.grid_columnconfigure(0, weight=1, uniform="h")
         head.grid_columnconfigure(1, weight=2, uniform="h")
         head.grid_columnconfigure(2, weight=1, uniform="h")
 
-        left = tk.Frame(head, bg=T.PAGE)
-        left.grid(row=0, column=0, sticky="w")
-        tk.Label(left, text="NETMON", bg=T.PAGE, fg=T.INK,
-                 font=th.brand).pack(side="left")
-        self.hdr_host = tk.Label(left, text="", bg=T.PAGE, fg=T.MUTED, font=th.label)
-        self.hdr_host.pack(side="left", padx=(8, 0))
+        # Stacked, and big enough to read off the panel to type into ssh.
+        who = tk.Frame(head, bg=T.PAGE)
+        who.grid(row=0, column=0, sticky="w")
+        self.hdr_host = tk.Label(who, text="", bg=T.PAGE, fg=T.INK2, font=th.host,
+                                 anchor="w", bd=0, pady=0)
+        self.hdr_host.pack(fill="x")
+        self.hdr_ip = tk.Label(who, text="", bg=T.PAGE, fg=T.INK, font=th.address,
+                               anchor="w", bd=0, pady=0)
+        self.hdr_ip.pack(fill="x")
 
-        self.hdr_state = tk.Label(head, text="", bg=T.PAGE, fg=T.INK2, font=th.title)
-        self.hdr_state.grid(row=0, column=1, sticky="n")
+        mid = tk.Frame(head, bg=T.PAGE)
+        mid.grid(row=0, column=1)
+        self.hdr_state = tk.Label(mid, text="", bg=T.PAGE, fg=T.INK2, font=th.verdict,
+                                  bd=0, pady=0)
+        self.hdr_state.pack()
+        self.hdr_detail = tk.Label(mid, text="", bg=T.PAGE, fg=T.INK2, font=th.label,
+                                   bd=0, pady=0)
+        self.hdr_detail.pack()
 
         right = tk.Frame(head, bg=T.PAGE)
         right.grid(row=0, column=2, sticky="e")
@@ -128,15 +150,15 @@ class Dashboard:
         self.t_latency = Tile(prime, th, "Latency", unit="ms")
         self.t_latency.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self.c_latency = LineChart(self.t_latency.body, th,
-                                   [("rtt", T.SERIES["blue"])], height=96)
+                                   [("rtt", T.SERIES["blue"])], height=60)
         self.c_latency.pack(fill="both", expand=True)
 
         self.t_loss = Tile(prime, th, "Packet loss", unit="%")
         self.t_loss.grid(row=0, column=1, sticky="nsew", padx=4)
-        self.c_loss = BarChart(self.t_loss.body, th, T.SERIES["blue"], height=96)
+        self.c_loss = BarChart(self.t_loss.body, th, T.SERIES["blue"], height=60)
         self.c_loss.pack(fill="both", expand=True)
 
-        self.t_bw = Tile(prime, th, "Bandwidth vs throughput", unit="Mbps in")
+        self.t_bw = Tile(prime, th, "Throughput", unit="Mbps in")
         self.t_bw.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
         # The meter is packed first so it keeps its height when space is tight;
         # it carries the series identity for the chart above it.
@@ -147,7 +169,7 @@ class Dashboard:
         self.m_bw.pack(fill="x", side="bottom", pady=(2, 0))
         self.c_bw = LineChart(self.t_bw.body, th,
                               [("rx", T.SERIES["blue"]), ("tx", T.SERIES["orange"])],
-                              height=80)
+                              height=44)
         self.c_bw.pack(fill="both", expand=True)
 
         # -- compact row ------------------------------------------------ #
@@ -165,35 +187,51 @@ class Dashboard:
             chart = None
             if chart_color:
                 chart = LineChart(tile.body, th, [(title, chart_color)],
-                                  height=34, show_axis=False)
+                                  height=26, show_axis=False)
                 chart.pack(fill="both", expand=True)
             return tile, chart
 
         self.t_jitter, self.c_jitter = compact(0, "Jitter", "ms", T.SERIES["aqua"])
         self.t_tcp, self.c_tcp = compact(1, "TCP connect", "ms", T.SERIES["violet"])
-        self.t_err, self.c_err = compact(2, "Errors", "/s", T.SERIES["red"])
-        self.t_avail, _ = compact(3, "Availability", "% 24h", None)
-        self.t_up, _ = compact(4, "Uptime", "", None)
+        self.t_dns, self.c_dns = compact(2, "DNS", "ms", T.SERIES["yellow"])
+        self.t_link, _ = compact(3, "Link", "Mbps", None)
+        self.t_avail, _ = compact(4, "Avail 24h", "%", None)
 
+        self.r_link_err = StatRow(self.t_link.body, th, "errors")
+        self.r_link_err.pack(fill="x")
+        self.r_link_total = StatRow(self.t_link.body, th, "total")
+        self.r_link_total.pack(fill="x")
         self.r_avail_1h = StatRow(self.t_avail.body, th, "1h")
         self.r_avail_1h.pack(fill="x")
-        self.r_avail_n = StatRow(self.t_avail.body, th, "echoes")
-        self.r_avail_n.pack(fill="x")
-        self.r_up_outages = StatRow(self.t_up.body, th, "outages")
-        self.r_up_outages.pack(fill="x")
-        self.r_up_last = StatRow(self.t_up.body, th, "last")
-        self.r_up_last.pack(fill="x")
+        self.r_avail_out = StatRow(self.t_avail.body, th, "outages 24h")
+        self.r_avail_out.pack(fill="x")
 
         # -- table ------------------------------------------------------ #
         bottom = Panel(outer, th, "Targets")
         bottom.grid(row=3, column=0, sticky="nsew")
+        self.pi_lbl = tk.Label(bottom.head, text="", bg=T.PANEL, fg=T.INK2,
+                               font=th.title, anchor="e", bd=0, pady=0)
+        self.pi_lbl.pack(side="right")
         # Footer first, so a short panel eats into the table rather than
         # clipping the status line off the bottom of the screen.
         self.footer = tk.Label(bottom.body, text="", bg=T.PANEL, fg=T.MUTED,
-                               font=th.label, anchor="w", justify="left")
+                               font=th.label, anchor="w", justify="left", bd=0, pady=0)
         self.footer.pack(fill="x", side="bottom", pady=(2, 0))
         self.table = TargetTable(bottom.body, th, rows=len(self.cfg.targets))
         self.table.pack(fill="x", side="top", expand=False)
+
+    def _build_menu(self) -> None:
+        """The touch menu: everything a keyboard does, for a panel without one."""
+        self.menu = tk.Frame(self.root, bg=T.AXIS, bd=0)
+        inner = tk.Frame(self.menu, bg=T.PANEL)
+        inner.pack(fill="both", expand=True, padx=2, pady=2)
+        for text, action in (("Run capacity test", self._menu_bandwidth),
+                             ("Exit dashboard", self.quit),
+                             ("Close", self.hide_menu)):
+            tk.Button(inner, text=text, command=action, font=self.theme.menu,
+                      bg=T.PANEL_ALT, fg=T.INK, activebackground=T.AXIS,
+                      activeforeground=T.INK, bd=0, highlightthickness=0,
+                      pady=14).pack(fill="x", padx=8, pady=6)
 
     # ------------------------------------------------------------------ #
     # Input
@@ -205,11 +243,34 @@ class Dashboard:
         r.bind("<q>", lambda e: self.quit())
         r.bind("<f>", lambda e: self.toggle_fullscreen())
         r.bind("<b>", lambda e: self.run_bandwidth_now())
-        r.bind("<Button-1>", lambda e: self.cycle_window())
+        r.bind("<Button-1>", self._on_tap)
         r.bind("<Right>", lambda e: self.cycle_window(1))
         r.bind("<Left>", lambda e: self.cycle_window(-1))
         for i, seconds in enumerate(self.windows[:9], start=1):
             r.bind(str(i), lambda e, s=seconds: self.set_window(s))
+
+    def _on_tap(self, event) -> None:
+        if self.menu.winfo_ismapped():
+            return      # the buttons handle their own taps
+        header_bottom = self.head.winfo_rooty() + self.head.winfo_height()
+        if event.y_root < header_bottom:
+            self.show_menu()
+        else:
+            self.cycle_window()
+
+    def show_menu(self) -> None:
+        self.menu.place(relx=0.5, rely=0.5, anchor="center", width=340)
+        self._menu_after = self.root.after(MENU_TIMEOUT_MS, self.hide_menu)
+
+    def hide_menu(self) -> None:
+        if self._menu_after is not None:
+            self.root.after_cancel(self._menu_after)
+            self._menu_after = None
+        self.menu.place_forget()
+
+    def _menu_bandwidth(self) -> None:
+        self.hide_menu()
+        self.run_bandwidth_now()
 
     def set_window(self, seconds: int) -> None:
         self.window_s = seconds
@@ -232,8 +293,7 @@ class Dashboard:
         if self.collector is None:
             return
         if self.collector.request_bandwidth():
-            self.footer.configure(text="bandwidth test requested - throughput will "
-                                       "spike to capacity while it runs")
+            self.footer.configure(text="capacity test requested")
 
     def quit(self) -> None:
         self._closing = True
@@ -277,43 +337,31 @@ class Dashboard:
         tcp = snap["tcp"]
         bw = snap["bandwidth"]
 
-        self._render_header(snap, primary, stale)
-        self._render_latency(primary, t0, t1, stale)
-        self._render_loss(primary, snap, t0, t1, stale)
-        self._render_bandwidth(iface, bw, t0, t1, stale)
+        spans = bw["spans"]
+        self._render_header(snap)
+        self._render_latency(primary, t0, t1, stale, spans)
+        self._render_loss(primary, t0, t1, stale, spans)
+        self._render_bandwidth(iface, bw, t0, t1, stale, spans)
         self._render_compact(primary, iface, tcp, snap, t0, t1, stale)
         self._render_table(snap)
-        self._render_footer(snap, iface, tcp, bw)
+        self._render_pi(snap["system"])
+        self._render_footer(snap, tcp)
 
-    def _render_header(self, snap, primary, stale) -> None:
+    def _render_header(self, snap) -> None:
         iface_name = snap["iface"]["name"] or "no iface"
-        self.hdr_host.configure(text=f"{snap['hostname']}  ·  {iface_name}")
+        self.hdr_host.configure(text=f"{snap['hostname']} · {iface_name}")
+        ip = snap["iface"]["ip"]
+        self.hdr_ip.configure(text=ip or "no IP address",
+                              fg=T.INK if ip else T.STATUS["warn"])
         self.hdr_clock.configure(text=fmt_clock(snap["now"]))
-        self.hdr_window.configure(text=f"window {_fmt_window(self.window_s)}")
+        self.hdr_window.configure(text=_fmt_window(self.window_s))
 
-        if stale:
-            self.hdr_state.configure(text="COLLECTOR NOT RESPONDING",
-                                     fg=T.STATUS["crit"])
-            return
-        name = primary.get("name", "?")
-        host = primary.get("host", "?")
-        if primary.get("outage_since"):
-            down_for = fmt_duration(snap["now"] - primary["outage_since"])
-            self.hdr_state.configure(
-                text=f"● OUTAGE  {name} ({host}) unreachable for {down_for}",
-                fg=T.STATUS["crit"])
-        elif primary.get("alive"):
-            self.hdr_state.configure(
-                text=f"● ONLINE  {name} ({host})", fg=T.STATUS["ok"])
-        elif not primary.get("has_data"):
-            self.hdr_state.configure(
-                text=f"● STARTING  waiting for the first reply from {name}",
-                fg=T.MUTED)
-        else:
-            self.hdr_state.configure(
-                text=f"● NO REPLY  {name} ({host})", fg=T.STATUS["warn"])
+        lv, headline, detail = diagnose(snap)
+        self.hdr_state.configure(text=f"● {headline}",
+                                 fg=T.MUTED if lv == "none" else T.status_color(lv))
+        self.hdr_detail.configure(text=detail)
 
-    def _render_latency(self, p, t0, t1, stale) -> None:
+    def _render_latency(self, p, t0, t1, stale, spans) -> None:
         th = self.th
         tile = self.t_latency
         if stale or not p:
@@ -324,13 +372,16 @@ class Dashboard:
         lv = T.level(p.get("rtt_avg"), th.latency_warn_ms, th.latency_crit_ms)
         lv = T.worst(lv, T.level(p.get("rtt_p95"), th.latency_crit_ms,
                                  th.latency_crit_ms * 2))
-        if p.get("has_data") and not p.get("alive"):
+        # One missed echo is a warning; only an outage is critical.
+        if p.get("outage_since"):
             lv = "crit"
+        elif p.get("has_data") and not p.get("alive"):
+            lv = T.worst(lv, "warn")
         tile.set_level(lv)
         tile.set_value(
             fmt_ms(p.get("rtt")),
-            sub=(f"avg {fmt_ms(p.get('rtt_avg'))}   p95 {fmt_ms(p.get('rtt_p95'))}   "
-                 f"min {fmt_ms(p.get('rtt_min'))}   max {fmt_ms(p.get('rtt_max'))} ms"),
+            sub=(f"avg {fmt_ms(p.get('rtt_avg'))}  p95 {fmt_ms(p.get('rtt_p95'))}  "
+                 f"max {fmt_ms(p.get('rtt_max'))}"),
             aux=f"{p.get('name', '')}",
         )
         lost_ts = [t for t, l in zip(p["ts"], p["lost_series"]) if l > 0]
@@ -338,9 +389,10 @@ class Dashboard:
             [p["ts"]], [p["rtt_series"]], t0, t1,
             y_floor=max(10.0, th.latency_warn_ms / 2),
             fmt=lambda v: f"{v:g}", lost_ts=lost_ts, max_gap_s=self.gap_ping,
+            spans=spans,
         )
 
-    def _render_loss(self, p, snap, t0, t1, stale) -> None:
+    def _render_loss(self, p, t0, t1, stale, spans) -> None:
         th = self.th
         tile = self.t_loss
         if stale or not p:
@@ -351,19 +403,17 @@ class Dashboard:
         loss = p.get("loss_pct")
         lv = T.level(loss, th.loss_warn_pct, th.loss_crit_pct)
         tile.set_level(lv)
-        window_pct = p.get("loss_window_pct")
         tile.set_value(
             fmt_pct(loss),
             sub=(f"{p.get('loss_window_lost', 0)} of {p.get('loss_window_sent', 0)} "
-                 f"echoes lost in {_fmt_window(self.window_s)} "
-                 f"({fmt_pct(window_pct)}%)   outages {p.get('total_outages', 0)}"),
+                 f"lost in {_fmt_window(self.window_s)}"),
             aux="rolling 60s",
         )
         values = [l * 100.0 for l in p["lost_series"]]
         self.c_loss.draw(p["ts"], values, t0, t1, y_floor=max(1.0, th.loss_warn_pct),
-                         fmt=lambda v: f"{v:g}%")
+                         fmt=lambda v: f"{v:g}%", spans=spans)
 
-    def _render_bandwidth(self, iface, bw, t0, t1, stale) -> None:
+    def _render_bandwidth(self, iface, bw, t0, t1, stale, spans) -> None:
         """Throughput (live, 1 Hz) against measured capacity (hourly)."""
         th = self.th
         tile = self.t_bw
@@ -387,14 +437,17 @@ class Dashboard:
 
         tile.set_level(T.level(util, th.util_warn_pct, th.util_crit_pct))
 
+        speed = iface.get("speed_mbps")
         if bw.get("running"):
-            cap_text = "capacity test running now..."
+            cap_text = "capacity test running"
         elif cap_down:
-            age = fmt_duration(bw.get("age_s")) if bw.get("age_s") else "just now"
-            cap_text = (f"capacity {fmt_mbps(cap_down)}↓ {fmt_mbps(cap_up)}↑ Mbps"
-                        f"   measured {age} ago")
+            # At link speed the test has measured the Pi's NIC, not the line.
+            limit = " NIC limit" if speed and cap_down >= speed * NIC_LIMIT else ""
+            age = fmt_duration(bw.get("age_s")) if bw.get("age_s") else "now"
+            cap_text = (f"cap {fmt_mbps(cap_down)}↓ {fmt_mbps(cap_up)}↑{limit}"
+                        f" · {age}")
         else:
-            cap_text = f"capacity not measured yet - assuming {fmt_mbps(fallback)} Mbps"
+            cap_text = f"no test yet, assuming {fmt_mbps(fallback)}"
 
         tile.set_value(fmt_mbps(rx), sub=cap_text, aux=f"↑ {fmt_mbps(tx)}")
         self.c_bw.draw(
@@ -406,6 +459,7 @@ class Dashboard:
             reference=cap_ref,
             reference_label=f"cap {fmt_mbps(cap_ref)}" if cap_ref else "",
             max_gap_s=self.gap_iface,
+            spans=spans,
         )
 
         # The meter carries the "vs": throughput as a share of capacity, which
@@ -446,45 +500,71 @@ class Dashboard:
                 lv = "crit"
             self.t_tcp.set_level(lv, show_text=False)
             retrans = tcp.get("retrans_pct")
-            est = tcp.get("established")
-            self.t_tcp.set_value(
-                fmt_ms(tcp.get("connect_ms")),
-                sub=(f":{tcp.get('port', '')}  retrans {fmt_pct(retrans)}%"
-                     f"  est {est if est is not None else '--'}"))
+            self.t_tcp.set_value(fmt_ms(tcp.get("connect_ms")),
+                                 sub=f"retrans {fmt_pct(retrans)}%")
             self.c_tcp.draw([tcp["ts"]], [tcp["connect_series"]], t0, t1,
                             y_floor=50.0, max_gap_s=self.gap_tcp)
 
-        # Interface errors
-        if stale:
-            self.t_err.set_level("none")
-            self.t_err.set_value("--")
+        # DNS lookup
+        dns = snap["dns"]
+        if stale or not dns["enabled"]:
+            self.t_dns.set_level("none")
+            self.t_dns.set_value("--", sub="" if stale else "disabled")
         else:
-            lv = T.level(iface.get("err_rate"), th.err_warn_rate, th.err_crit_rate)
-            self.t_err.set_level(lv, show_text=False)
-            total = iface.get("errors_total", 0) + iface.get("drops_total", 0)
-            self.t_err.set_value(
-                fmt_rate(iface.get("err_rate")),
-                sub=f"{total} since start  {fmt_pct(iface.get('err_pct'), 3)}% of pkts")
-            self.c_err.draw([iface["err_ts"]], [iface["err_series"]], t0, t1,
-                            y_floor=max(1.0, th.err_warn_rate),
-                            max_gap_s=self.gap_iface)
+            failed = dns["attempts"] and dns["ms"] is None
+            self.t_dns.set_level("crit" if dns["failing"]
+                                 else "warn" if failed
+                                 else T.level(dns["ms"], th.tcp_warn_ms, th.tcp_crit_ms),
+                                 show_text=False)
+            self.t_dns.set_value(fmt_ms(dns["ms"]),
+                                 sub=f"failed {dns['fails']} of {dns['attempts']}")
+            self.c_dns.draw([dns["ts"]], [dns["series"]], t0, t1,
+                            y_floor=50.0, max_gap_s=self.gap_dns)
+
+        # The link itself, and the errors on it
+        self._render_link(iface, stale)
 
         # Availability
         avail = (p or {}).get("avail_24h")
         lv = T.level(avail, th.avail_warn_pct, th.avail_crit_pct, lower_is_better=False)
         self.t_avail.set_level(lv, show_text=False)
-        self.t_avail.set_value(fmt_avail(avail))
+        last = (p or {}).get("last_outage_duration")
+        self.t_avail.set_value(fmt_avail(avail),
+                               sub=f"last outage {fmt_duration(last)}" if last
+                               else "no recent outage")
         self.r_avail_1h.set(f"{fmt_avail((p or {}).get('avail_1h'))}%"
                             if (p or {}).get("avail_1h") is not None else "--")
-        n24 = (p or {}).get("avail_24h_n") or 0
-        self.r_avail_n.set(f"{n24:,}" if n24 else "collecting")
+        self.r_avail_out.set(str((p or {}).get("outages", 0)))
 
-        # Monitor uptime / outage state
-        self.t_up.set_level("ok" if not stale else "none", show_text=False)
-        self.t_up.set_value(fmt_duration(snap.get("uptime_s")))
-        self.r_up_outages.set(str((p or {}).get("total_outages", 0)))
-        last = (p or {}).get("last_outage_duration")
-        self.r_up_last.set(fmt_duration(last) if last else "none")
+    def _render_link(self, iface, stale) -> None:
+        th = self.th
+        tile = self.t_link
+        if stale:
+            tile.set_level("none")
+            tile.set_value("--")
+            return
+
+        up, signal, speed = iface["link_up"], iface["signal_dbm"], iface["speed_mbps"]
+        lv = T.level(iface.get("err_rate"), th.err_warn_rate, th.err_crit_rate)
+        if up is False:
+            hero, unit = "DOWN", ""
+            lv = "crit"
+        elif signal is not None:
+            hero, unit = f"{signal:.0f}", "dBm"
+            lv = T.worst(lv, T.level(signal, th.signal_warn_dbm, th.signal_crit_dbm,
+                                     lower_is_better=False))
+        elif speed:
+            hero, unit = f"{speed:.0f}", "Mbps"
+            # Ethernet that has fallen back to 10 Mbps is nearly always the cable.
+            lv = T.worst(lv, "warn" if speed < 100 else "ok")
+        else:
+            hero, unit = "UP" if up else "--", ""
+        tile.set_level(lv, show_text=False)
+        tile.set_unit(unit)
+        tile.set_value(hero, sub=iface["name"] or "")
+        self.r_link_err.set(f"{fmt_rate(iface.get('err_rate'))}/s")
+        self.r_link_total.set(str(iface.get("errors_total", 0)
+                                  + iface.get("drops_total", 0)))
 
     def _render_table(self, snap) -> None:
         th = self.th
@@ -521,7 +601,25 @@ class Dashboard:
                 state,
             ], lv, primary=bool(t.get("primary")))
 
-    def _render_footer(self, snap, iface, tcp, bw) -> None:
+    def _render_pi(self, system) -> None:
+        """Quiet while healthy; the colour only changes when the Pi is the problem."""
+        th = self.th
+        temp, cpu = system["temp_c"], system["cpu_pct"]
+        bits = []
+        if temp is not None:
+            bits.append(f"Pi {temp:.0f}°C")
+        if system["power_level"]:
+            bits.append(system["power_text"])
+        if cpu is not None:
+            bits.append(f"cpu {cpu:.0f}%")
+        if system["uptime_s"] is not None:
+            bits.append(f"up {fmt_duration(system['uptime_s'])}")
+        lv = T.worst(T.level(temp, th.temp_warn_c, th.temp_crit_c),
+                     system["power_level"] or "none")
+        self.pi_lbl.configure(text="  ·  ".join(bits),
+                              fg=T.INK2 if lv in ("ok", "none") else T.status_color(lv))
+
+    def _render_footer(self, snap, tcp) -> None:
         bits = []
         if snap["stale"]:
             age = snap["now"] - (snap["collector_ts"] or snap["now"])
@@ -537,8 +635,7 @@ class Dashboard:
         if not bits:
             bits.append(f"history {_human_bytes(snap['db_bytes'])}"
                         f"   tcp {tcp.get('host')}:{tcp.get('port')}"
-                        f"   fails {tcp.get('fails', 0)}/{tcp.get('attempts', 0)}")
-        bits.append("[tap] window   [b] bandwidth test   [f] fullscreen   [q] quit")
+                        f"   tap header for menu")
         self.footer.configure(text="     ".join(bits))
 
 

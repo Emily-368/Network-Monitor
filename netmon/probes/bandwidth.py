@@ -3,12 +3,12 @@
 Bandwidth here means *how much the link can carry*, which can only be found by
 filling it. That makes it the opposite of every other probe in netmon: it is
 expensive, it perturbs what it measures, and it must run rarely (hourly by
-default). Throughput - what is actually flowing - comes from
+default). Throughput - what the Pi itself is sending and receiving - comes from
 :mod:`netmon.probes.iface` at 1 Hz and is free.
 
 Two methods:
 
-  * ``iperf3`` against a server on your own LAN. Strongly preferred on a Pi 3B+:
+  * ``iperf3`` against a server on your own LAN. Strongly preferred on a Pi 3B:
     it measures your link rather than the internet, finishes in seconds, and
     costs almost no RAM. Needs ``apt install iperf3`` here and ``iperf3 -s``
     there.
@@ -94,7 +94,7 @@ def _run_speedtest(cfg) -> dict:
         st = speedtest.Speedtest(secure=True)
         st.get_best_server()
         # pre_allocate=False keeps the upload payload off the heap; the default
-        # tries to allocate the whole thing up front and OOMs a Pi 3B+.
+        # tries to allocate the whole thing up front and OOMs a Pi 3B.
         down = st.download(threads=threads) / MEGA
         up = st.upload(threads=threads, pre_allocate=False) / MEGA
         res = st.results.dict()
@@ -145,8 +145,10 @@ class BandwidthProbe:
                      "next in %.0f min", self.interval / 60)
             return
 
+        started = time.time()
         with self.state.lock:
             self.state.bandwidth.running = True
+            self.state.bandwidth.started_ts = started
         log.info("bandwidth: running %s test", self.bcfg.method)
 
         loop = asyncio.get_running_loop()
@@ -157,6 +159,7 @@ class BandwidthProbe:
         finally:
             with self.state.lock:
                 self.state.bandwidth.running = False
+                self.state.bandwidth.spans.append((started, time.time()))
 
         result.setdefault("down_mbps", None)
         result.setdefault("up_mbps", None)

@@ -1,4 +1,4 @@
-"""Tkinter dashboard sized for a 5" 800x480 DSI panel."""
+"""Tkinter dashboard sized for a 5" 800x480 panel."""
 
 from .app import Dashboard, run_dashboard
 

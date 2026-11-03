@@ -1,4 +1,4 @@
-"""netmon - a small real-time network monitor for a Raspberry Pi with a DSI panel.
+"""netmon - a small real-time network monitor for a Raspberry Pi with a 5" TFT.
 
 Two halves that share one process:
 

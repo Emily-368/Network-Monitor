@@ -8,17 +8,18 @@ being mutated underneath it.
 
 from __future__ import annotations
 
-import math
 import socket
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Optional
 
 from .util import mean, percentile
 
 # A sample is (ts, value); value is None when the measurement failed.
-Sample = tuple[float, float | None]
+# Optional, not "float | None": this line runs at import, and Bullseye is Python 3.9.
+Sample = tuple[float, Optional[float]]
 
 
 class Series:
@@ -53,11 +54,6 @@ class Series:
             out.append(item)
         out.reverse()
         return out
-
-    def tail(self, count: int) -> list[Sample]:
-        if count >= len(self._q):
-            return list(self._q)
-        return list(self._q)[-count:]
 
 
 def series_stats(samples: list[Sample]) -> dict:
@@ -114,7 +110,8 @@ class TargetState:
         self.outage_since: float | None = None
         self.last_outage_ended: float | None = None
         self.last_outage_duration: float | None = None
-        self.total_outages = 0
+        self.total_outages = 0          # this run only
+        self.outages_24h: int | None = None   # from history; None without a database
         self.last_error: str | None = None
 
         self._prev_rtt: float | None = None
@@ -201,7 +198,9 @@ class TargetState:
 
         return {
             "name": self.name,
-            "host": self.resolved_host,
+            "host": self.resolved_host or "no route",
+            "no_route": self.resolved_host is None,
+            "is_gateway": self.host == "auto",
             "primary": self.primary,
             "alive": self.is_alive(),
             "has_data": bool(self.rounds),
@@ -222,7 +221,8 @@ class TargetState:
             "last_ok_ts": self.last_ok_ts,
             "outage_since": self.outage_since,
             "last_outage_duration": self.last_outage_duration,
-            "total_outages": self.total_outages,
+            "outages": (self.total_outages if self.outages_24h is None
+                        else self.outages_24h),
             "last_error": self.last_error,
             # Parallel lists keep the Tk canvas code simple.
             "ts": [r.ts for r in win],
@@ -240,15 +240,15 @@ class TargetState:
 class IfaceState:
     def __init__(self, maxlen: int):
         self.name: str | None = None
+        self.ip: str | None = None             # IPv4 address, None until assigned
+        self.link_up: bool | None = None       # None = the kernel does not say
+        self.signal_dbm: float | None = None   # Wi-Fi only
         self.speed_mbps: float | None = None   # link speed reported by the driver
         self.rx = Series(maxlen)               # Mbps
         self.tx = Series(maxlen)
         self.err_rate = Series(maxlen)         # (errors + drops) per second
         self.errors_total = 0
         self.drops_total = 0
-        self.packets_total = 0
-        self.bytes_rx_total = 0
-        self.bytes_tx_total = 0
         self.last_error: str | None = None
 
     def snapshot(self, window_s: float, now: float) -> dict:
@@ -257,9 +257,11 @@ class IfaceState:
         err_win = self.err_rate.window(window_s, now)
         rx_stats = series_stats(rx_win)
         tx_stats = series_stats(tx_win)
-        pkt = self.packets_total
         return {
             "name": self.name,
+            "ip": self.ip,
+            "link_up": self.link_up,
+            "signal_dbm": self.signal_dbm,
             "speed_mbps": self.speed_mbps,
             "rx": self.rx.last(),
             "tx": self.tx.last(),
@@ -273,10 +275,6 @@ class IfaceState:
             "err_rate_max": series_stats(err_win)["max"],
             "errors_total": self.errors_total,
             "drops_total": self.drops_total,
-            "packets_total": pkt,
-            "err_pct": (100.0 * (self.errors_total + self.drops_total) / pkt) if pkt else None,
-            "bytes_rx_total": self.bytes_rx_total,
-            "bytes_tx_total": self.bytes_tx_total,
             "last_error": self.last_error,
             "ts": [t for t, _ in rx_win],
             "rx_series": [v for _, v in rx_win],
@@ -297,8 +295,6 @@ class TcpState:
         self.port: int = 0
         self.connect = Series(max(60, maxlen // 10))   # ms, sampled slowly
         self.retrans_pct: float | None = None
-        self.established: int | None = None
-        self.time_wait: int | None = None
         self.fails = 0
         self.attempts = 0
         self.last_error: str | None = None
@@ -314,14 +310,67 @@ class TcpState:
             "connect_max": stats["max"],
             "ok": self.connect.last() is not None,
             "retrans_pct": self.retrans_pct,
-            "established": self.established,
-            "time_wait": self.time_wait,
             "attempts": self.attempts,
             "fails": self.fails,
             "fail_pct": (100.0 * self.fails / self.attempts) if self.attempts else None,
             "last_error": self.last_error,
             "ts": [t for t, _ in win],
             "connect_series": [v for _, v in win],
+        }
+
+
+# --------------------------------------------------------------------------- #
+# DNS resolution
+# --------------------------------------------------------------------------- #
+
+
+class DnsState:
+    FAILING_AFTER = 2       # one slow answer is not a DNS fault
+
+    def __init__(self, maxlen: int):
+        self.host: str = ""
+        self.enabled = False
+        self.lookup = Series(max(60, maxlen // 10))   # ms, sampled slowly
+        self.attempts = 0
+        self.fails = 0
+        self.consec_fail = 0
+        self.last_error: str | None = None
+
+    def snapshot(self, window_s: float, now: float) -> dict:
+        win = self.lookup.window(max(window_s, 600), now)
+        return {
+            "host": self.host,
+            "enabled": self.enabled,
+            "ms": self.lookup.last(),
+            "attempts": self.attempts,
+            "fails": self.fails,
+            "failing": self.consec_fail >= self.FAILING_AFTER,
+            "last_error": self.last_error,
+            "ts": [t for t, _ in win],
+            "series": [v for _, v in win],
+        }
+
+
+# --------------------------------------------------------------------------- #
+# The Pi itself
+# --------------------------------------------------------------------------- #
+
+
+class SystemState:
+    def __init__(self):
+        self.temp_c: float | None = None
+        self.cpu_pct: float | None = None
+        self.uptime_s: float | None = None
+        self.power_level: str | None = None     # None off a Pi / without vcgencmd
+        self.power_text: str = ""
+
+    def snapshot(self) -> dict:
+        return {
+            "temp_c": self.temp_c,
+            "cpu_pct": self.cpu_pct,
+            "uptime_s": self.uptime_s,
+            "power_level": self.power_level,
+            "power_text": self.power_text,
         }
 
 
@@ -341,6 +390,8 @@ class BandwidthState:
         self.ok: bool = False
         self.note: str = ""
         self.running: bool = False
+        self.started_ts: float | None = None    # while running
+        self.spans: deque[tuple[float, float]] = deque(maxlen=8)  # finished tests
         self.history: list[dict] = []   # last few results, newest last
 
     def record(self, result: dict) -> None:
@@ -368,6 +419,10 @@ class BandwidthState:
             "ok": self.ok,
             "note": self.note,
             "running": self.running,
+            # When the link was deliberately saturated, so a latency spike during
+            # a test is not read as a network problem.
+            "spans": list(self.spans) + ([(self.started_ts, now)]
+                                         if self.running and self.started_ts else []),
             "history": list(self.history),
         }
 
@@ -395,6 +450,8 @@ class LiveState:
             )
         self.iface = IfaceState(maxlen)
         self.tcp = TcpState(maxlen)
+        self.dns = DnsState(maxlen)
+        self.system = SystemState()
         self.bandwidth = BandwidthState()
         self.collector_ts: float = 0.0     # heartbeat: last completed probe round
         self.probe_errors: deque[str] = deque(maxlen=12)
@@ -420,6 +477,12 @@ class LiveState:
             if not self.probe_errors or self.probe_errors[-1][9:] != text:
                 self.probe_errors.append(stamped)
 
+    def note_event(self, ts: float, kind: str, target: str, detail: str) -> None:
+        with self._lock:
+            self.events.append({"ts": ts, "kind": kind, "target": target,
+                                "detail": detail})
+            del self.events[:-30]
+
     def beat(self, ts: float | None = None) -> None:
         with self._lock:
             self.collector_ts = ts if ts is not None else time.time()
@@ -441,6 +504,8 @@ class LiveState:
                 "primary": next((t for t in targets if t["name"] == primary_name), None),
                 "iface": self.iface.snapshot(window_s, now),
                 "tcp": self.tcp.snapshot(window_s, now),
+                "dns": self.dns.snapshot(window_s, now),
+                "system": self.system.snapshot(),
                 "bandwidth": self.bandwidth.snapshot(now),
                 "errors": list(self.probe_errors),
                 "events": list(self.events),
@@ -448,15 +513,3 @@ class LiveState:
                 "db_error": self.db_error,
             }
         return snap
-
-
-def nan_safe(value):
-    """Turn NaN/inf into None so the UI never tries to plot them."""
-    if value is None:
-        return None
-    try:
-        if math.isnan(value) or math.isinf(value):
-            return None
-    except TypeError:
-        return None
-    return value

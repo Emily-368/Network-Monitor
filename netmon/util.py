@@ -59,10 +59,66 @@ def pick_interface(preferred: str = "auto") -> str | None:
         stats = psutil.net_if_stats()
     except OSError:
         return None
-    for name, st in stats.items():
-        if st.isup and not name.startswith(("lo", "docker", "veth", "br-")):
-            return name
+    # No route yet (early boot, say). A NIC that already has an address is a far
+    # better guess than one that is merely up.
+    up = [name for name, st in stats.items()
+          if st.isup and not name.startswith(("lo", "docker", "veth", "br-"))]
+    return next((name for name in up if iface_ipv4(name)), up[0] if up else None)
+
+
+def iface_ipv4(name: str | None) -> str | None:
+    """First IPv4 address on ``name``, or ``None`` if it has none (yet)."""
+    if not name:
+        return None
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        addrs = psutil.net_if_addrs().get(name, [])
+    except OSError:
+        return None
+    return next((a.address for a in addrs if a.family == socket.AF_INET), None)
+
+
+def link_is_up(name: str) -> bool | None:
+    """Carrier state from sysfs; ``None`` when the kernel does not know."""
+    try:
+        with open(f"/sys/class/net/{name}/operstate", "r", encoding="ascii") as fh:
+            state = fh.read().strip()
+    except OSError:
+        return None
+    if state == "up":
+        return True
+    return None if state == "unknown" else False
+
+
+def wifi_signal_dbm(name: str) -> float | None:
+    """Signal level from /proc/net/wireless; ``None`` for a wired interface."""
+    try:
+        with open("/proc/net/wireless", "r", encoding="ascii") as fh:
+            lines = fh.read().splitlines()[2:]
+    except OSError:
+        return None
+    for line in lines:
+        # iface: status link level noise ...
+        f = line.split()
+        if len(f) >= 4 and f[0].rstrip(":") == name:
+            try:
+                level = float(f[3].rstrip("."))
+            except ValueError:
+                return None
+            return level if level < 0 else None
     return None
+
+
+def read_cpu_temp() -> float | None:
+    """SoC temperature in Celsius, or ``None`` where sysfs does not expose it."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r", encoding="ascii") as fh:
+            return int(fh.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
 
 
 def host_uptime() -> float | None:

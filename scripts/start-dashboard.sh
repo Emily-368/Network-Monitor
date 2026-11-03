@@ -8,7 +8,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# Keep the panel awake. Harmless if X is not running the relevant extensions.
+# Keep the panel awake. Does nothing on a Wayland desktop; the installer handles
+# that case through raspi-config. Harmless if X lacks the relevant extensions.
 if command -v xset >/dev/null 2>&1; then
     xset s off        || true
     xset s noblank    || true
