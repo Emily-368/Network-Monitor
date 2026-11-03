@@ -9,8 +9,10 @@
 #   4. an autostart entry so the dashboard comes up with the desktop
 #   5. turns off screen blanking, for a panel that has to stay readable
 #   6. with --headless-service: the collector service instead of the autostart
+#   7. with --spi-display: X11 drawing on the SPI panel's framebuffer
 #
 # Usage:  bash scripts/install.sh [--no-autostart] [--with-iperf3] [--headless-service]
+#                                 [--spi-display]
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,6 +20,7 @@ VENV="$PROJECT_DIR/.venv"
 AUTOSTART=1
 WITH_IPERF3=0
 HEADLESS_SERVICE=0
+SPI_DISPLAY=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -25,7 +28,8 @@ for arg in "$@"; do
         --with-iperf3)  WITH_IPERF3=1 ;;
         # The service and the dashboard must not run together (both would collect).
         --headless-service) HEADLESS_SERVICE=1; AUTOSTART=0 ;;
-        -h|--help)      sed -n '2,13p' "$0"; exit 0 ;;
+        --spi-display)  SPI_DISPLAY=1 ;;
+        -h|--help)      sed -n '2,15p' "$0"; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -41,6 +45,7 @@ fi
 say "apt packages"
 APT_PKGS=(python3-tk python3-venv python3-pip)
 [[ $WITH_IPERF3 -eq 1 ]] && APT_PKGS+=(iperf3)
+[[ $SPI_DISPLAY -eq 1 ]] && APT_PKGS+=(xserver-xorg-video-fbdev)
 sudo apt-get update -qq
 sudo apt-get install -y "${APT_PKGS[@]}"
 
@@ -82,6 +87,31 @@ if command -v raspi-config >/dev/null 2>&1; then
     # Covers Wayland desktops too, where the xset calls in start-dashboard.sh do nothing.
     sudo raspi-config nonint do_blanking 1 && echo "   off (takes effect after a reboot)" \
         || echo "   could not change it - see Display Options in raspi-config"
+fi
+
+# --------------------------------------------------------------------------- #
+if [[ $SPI_DISPLAY -eq 1 ]]; then
+    say "SPI display"
+    # Wayland desktops need a DRM device, which an fbtft panel does not provide.
+    if command -v raspi-config >/dev/null 2>&1; then
+        sudo raspi-config nonint do_spi 0 || echo "   could not enable SPI"
+        sudo raspi-config nonint do_wayland W1 || echo "   could not select X11"
+    fi
+    if [[ -e /dev/fb1 ]]; then
+        # X draws straight on the panel, so no fbcp process has to copy the screen.
+        sudo mkdir -p /etc/X11/xorg.conf.d
+        sudo tee /etc/X11/xorg.conf.d/99-netmon-spi.conf >/dev/null <<'XORG'
+Section "Device"
+    Identifier "netmon SPI panel"
+    Driver     "fbdev"
+    Option     "fbdev" "/dev/fb1"
+EndSection
+XORG
+        echo "   X will draw on /dev/fb1 after a reboot"
+    else
+        echo "   no /dev/fb1: load the panel's dtoverlay from its vendor, reboot, re-run."
+        echo "   If the panel is a DRM display instead, X should find it without this."
+    fi
 fi
 
 # --------------------------------------------------------------------------- #

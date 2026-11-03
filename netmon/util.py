@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import glob
+import os
 import socket
 import struct
 import time
@@ -121,6 +123,24 @@ def read_cpu_temp() -> float | None:
         return None
 
 
+def list_framebuffers() -> list[str]:
+    """Framebuffers the kernel knows about, as ``fb1 fb_ili9486 800x480``.
+
+    An fbtft SPI panel normally appears as a second framebuffer, /dev/fb1.
+    """
+    out = []
+    for path in sorted(glob.glob("/sys/class/graphics/fb[0-9]*")):
+        try:
+            with open(f"{path}/name", "r", encoding="ascii") as fh:
+                name = fh.read().strip()
+            with open(f"{path}/virtual_size", "r", encoding="ascii") as fh:
+                size = fh.read().strip().replace(",", "x")
+        except OSError:
+            continue
+        out.append(f"{os.path.basename(path)} {name} {size}")
+    return out
+
+
 def host_uptime() -> float | None:
     """Seconds since boot, or ``None`` where /proc is not available."""
     try:
@@ -231,7 +251,8 @@ def fmt_rate(value: float | None) -> str:
 
 
 def fmt_clock(ts: float | None = None) -> str:
-    return time.strftime("%H:%M:%S", time.localtime(ts if ts is not None else time.time()))
+    """No seconds: a digit that changes every refresh is wasted SPI bandwidth."""
+    return time.strftime("%H:%M", time.localtime(ts if ts is not None else time.time()))
 
 
 # --------------------------------------------------------------------------- #

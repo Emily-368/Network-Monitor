@@ -6,6 +6,10 @@ status palette, and recessive chrome one step off the surface. Status colour is
 always paired with a text label on screen, so nothing is encoded by colour
 alone - which matters more than usual here, because a 5" TFT at an angle
 flattens hue badly.
+
+The chrome is lighter than a typical dark theme would use. SPI TFTs are usually
+16-bit colour and often TN panels, which crush near-blacks together: gridlines and
+table stripes one step off the surface simply vanish.
 """
 
 from __future__ import annotations
@@ -17,12 +21,12 @@ import tkinter.font as tkfont
 
 PAGE = "#0d0d0d"        # behind the panels
 PANEL = "#1a1a19"       # chart surface
-PANEL_ALT = "#202020"   # table stripe
+PANEL_ALT = "#2a2a29"   # table stripe
 INK = "#f0efec"         # primary
 INK2 = "#c3c2b7"        # secondary
-MUTED = "#898781"       # axis labels, units
-GRID = "#2c2c2a"        # hairline gridlines
-AXIS = "#383835"        # baseline
+MUTED = "#a3a19a"       # axis labels, units
+GRID = "#3a3a37"        # hairline gridlines
+AXIS = "#4a4a46"        # baseline
 
 # -- categorical series slots, in fixed order ------------------------------- #
 

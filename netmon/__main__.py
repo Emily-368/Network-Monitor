@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import threading
@@ -23,7 +24,7 @@ from .config import load_config
 from .state import LiveState
 from .storage import Storage
 from .util import (default_route, fmt_duration, fmt_mbps, fmt_ms, fmt_pct,
-                   iface_ipv4, pick_interface)
+                   iface_ipv4, list_framebuffers, pick_interface)
 
 log = logging.getLogger("netmon")
 
@@ -72,6 +73,8 @@ def _selftest(cfg) -> int:
     print(f"  measuring on : {measured or '(none found)'}"
           f" address={iface_ipv4(measured) or 'none'}")
     print(f"  database     : {cfg.db_file()}")
+    print(f"  framebuffers : {'; '.join(list_framebuffers()) or 'none found'}")
+    print(f"  session      : {os.environ.get('XDG_SESSION_TYPE') or 'none'}")
 
     # Report which optional pieces are present before anything is attempted.
     for module, why in (("icmplib", "ICMP echo without root"),

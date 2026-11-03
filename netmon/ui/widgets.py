@@ -3,7 +3,9 @@
 No matplotlib: on a Pi 3B a matplotlib redraw costs tenths of a second and
 tens of megabytes, and all that is needed here is a line, a band and some bars.
 Canvas items are pooled and updated with ``coords()`` rather than deleted and
-recreated, so a 2 Hz refresh does not churn the heap.
+recreated, so refreshing does not churn the heap. Text only reconfigures when it
+changes, because any reconfigure repaints, and on an SPI panel every repainted
+pixel has to be pushed down a slow bus.
 
 Charts bucket their samples into one column per ~2 px and draw a min/max range
 band behind a mean line, so a 30-minute window stays honest instead of
@@ -20,6 +22,13 @@ from . import theme as T
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def set_label(label: tk.Label, **options) -> None:
+    """Configure only what differs, so an unchanged label is not repainted."""
+    changed = {k: v for k, v in options.items() if str(label.cget(k)) != str(v)}
+    if changed:
+        label.configure(**changed)
 
 
 def nice_ceil(value: float) -> float:
@@ -449,7 +458,7 @@ class Tile(tk.Frame):
             self.configure(bg=T.status_color(lv))
             self.chip.configure(fg=T.status_color(lv))
         # Colour is never the only channel: the chip always spells it out.
-        self.chip.configure(text=f"● {T.status_text(lv)}" if show_text else "")
+        set_label(self.chip, text=f"● {T.status_text(lv)}" if show_text else "")
 
     def set_value(self, text: str, sub: str = "", aux: str = "") -> None:
         if self.value_lbl.cget("text") != text:
@@ -607,5 +616,5 @@ class TargetTable(tk.Frame):
             if cell.cget("text") != text:
                 cell.configure(text=text)
         # Identity in the first column, state in the last; the rest stays ink.
-        row[0].configure(fg=T.INK if primary else T.INK2)
-        row[-1].configure(fg=T.status_color(level))
+        set_label(row[0], fg=T.INK if primary else T.INK2)
+        set_label(row[-1], fg=T.status_color(level))
