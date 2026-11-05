@@ -53,6 +53,14 @@ python -m netmon --selftest   # check the environment and probe once
 python -m netmon --report     # availability summary from the stored history
 ```
 
+To update later, run this on the Pi. It pulls the latest changes for the current
+branch, updates Python packages if needed, and restarts netmon. It never discards
+local edits; if one conflicts with an update, it stops and says so.
+
+```bash
+bash scripts/update.sh
+```
+
 On the panel: **tap the header** for a menu (run a capacity test, exit), and **tap
 anywhere else** to change the time window. With a keyboard or over VNC: `←`/`→` or
 `1`–`4` for the window, `b` for a capacity test, `f` for fullscreen, `q` to quit.
