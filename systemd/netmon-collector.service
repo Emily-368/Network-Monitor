@@ -1,9 +1,10 @@
 # Collector only - no display. Use this on a Pi with no panel attached, or
 # when you want history collected even while the desktop is logged out.
 #
-#   sudo cp systemd/netmon-collector.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now netmon-collector
+#   bash scripts/install.sh --headless-service
+#
+# That fits the paths and user below to your install. Written out here for user
+# pi in /home/pi/netmon, which recent Raspberry Pi OS images do not create.
 #
 # IMPORTANT: do not run this at the same time as the dashboard. The dashboard
 # process collects as well, so both running means every target is probed twice

@@ -6,7 +6,8 @@ keep the write volume down:
   * inserts are buffered in RAM and committed in one transaction every few
     seconds (``flush``),
   * 1 Hz raw rows are folded into per-minute aggregates (``rollup``) and then
-    deleted (``purge``), so the file reaches a steady size, and
+    deleted (``purge``), so the file reaches a steady size - and each rollup
+    touches only the minutes that are new, never the whole raw table, and
   * WAL + ``synchronous=NORMAL``, which is the usual trade for a monitor: a
     power cut can cost the last few seconds of samples, nothing more.
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -34,6 +36,7 @@ SCHEMA = (
            lost      INTEGER NOT NULL,
            jitter_ms REAL)""",
     "CREATE INDEX IF NOT EXISTS ix_ping_raw ON ping_raw(target, ts)",
+    "CREATE INDEX IF NOT EXISTS ix_ping_raw_ts ON ping_raw(ts)",
     """CREATE TABLE IF NOT EXISTS ping_minute (
            minute     INTEGER NOT NULL,
            target     TEXT    NOT NULL,
@@ -56,7 +59,9 @@ SCHEMA = (
            drop_out INTEGER,
            pkt_in  INTEGER,
            pkt_out INTEGER)""",
-    "CREATE INDEX IF NOT EXISTS ix_iface_raw ON iface_raw(iface, ts)",
+    # Rollup and purge select on time alone; nothing queries by interface.
+    "DROP INDEX IF EXISTS ix_iface_raw",
+    "CREATE INDEX IF NOT EXISTS ix_iface_raw_ts ON iface_raw(ts)",
     """CREATE TABLE IF NOT EXISTS iface_minute (
            minute  INTEGER NOT NULL,
            iface   TEXT    NOT NULL,
@@ -99,6 +104,9 @@ SCHEMA = (
 )
 
 BANDWIDTH_RETENTION_DAYS = 365
+# Rollup re-reads this many minutes behind its mark: a row stamped just before a
+# minute boundary can still be sitting in the write buffer when that minute closes.
+ROLLUP_OVERLAP_MIN = 2
 
 
 def _locked(fn):
@@ -112,7 +120,12 @@ def _locked(fn):
 
 
 class Storage:
-    """Buffered SQLite writer. Create and use it from a single thread."""
+    """Buffered SQLite writer.
+
+    Probes append from the collector's event loop; flush, rollup and queries run
+    in a worker thread. Those are slow on an SD card, so the buffers have their
+    own short-held lock and appending never waits for the database.
+    """
 
     def __init__(self, path: Path | str, raw_retention_hours: float = 6.0,
                  retention_days: float = 30.0):
@@ -120,10 +133,11 @@ class Storage:
         self.raw_retention_s = max(1800.0, raw_retention_hours * 3600.0)
         self.retention_s = max(3600.0, retention_days * 86400.0)
         self._conn: sqlite3.Connection | None = None
-        # One connection, used from the collector thread in normal operation.
-        # The lock plus check_same_thread=False keeps it correct anyway, so a
-        # read from the UI thread or a signal handler cannot corrupt anything.
+        # One connection, shared between threads: the lock plus
+        # check_same_thread=False serialises every use of it.
         self._lock = threading.RLock()
+        self._buf_lock = threading.Lock()
+        self._rolled_min: int | None = None     # newest minute already rolled up
         self._ping: list[tuple] = []
         self._iface: list[tuple] = []
         self._tcp: list[tuple] = []
@@ -170,91 +184,93 @@ class Storage:
     # -- buffered writes ---------------------------------------------------- #
 
     def add_ping(self, ts, target, rtt_ms, sent, lost, jitter_ms) -> None:
-        with self._lock:
+        with self._buf_lock:
             self._ping.append((ts, target, rtt_ms, sent, lost, jitter_ms))
 
     def add_iface(self, ts, iface, rx, tx, err_in, err_out, drop_in, drop_out,
                   pkt_in, pkt_out) -> None:
-        with self._lock:
+        with self._buf_lock:
             self._iface.append((ts, iface, rx, tx, err_in, err_out, drop_in,
                                 drop_out, pkt_in, pkt_out))
 
-    def add_tcp(self, ts, host, port, connect_ms, ok, retrans_pct, established) -> None:
-        with self._lock:
-            self._tcp.append((ts, host, port, connect_ms, int(ok), retrans_pct,
-                              established))
+    def add_tcp(self, ts, host, port, connect_ms, ok, retrans_pct) -> None:
+        with self._buf_lock:
+            # NULL fills the retired "established" column in existing databases.
+            self._tcp.append((ts, host, port, connect_ms, int(ok), retrans_pct, None))
 
     def add_bandwidth(self, ts, method, down, up, latency, server, ok, note) -> None:
-        with self._lock:
+        with self._buf_lock:
             self._bw.append((ts, method, down, up, latency, server, int(ok), note))
 
     def add_event(self, ts, kind, target, detail) -> None:
-        with self._lock:
+        with self._buf_lock:
             self._events.append((ts, kind, target, detail))
 
     @_locked
     def flush(self) -> None:
         """Commit everything buffered in one transaction."""
-        if self._conn is None:
-            self._drop_buffers()
-            return
-        if not any((self._ping, self._iface, self._tcp, self._bw, self._events)):
+        with self._buf_lock:
+            ping, self._ping = self._ping, []
+            iface, self._iface = self._iface, []
+            tcp, self._tcp = self._tcp, []
+            bw, self._bw = self._bw, []
+            events, self._events = self._events, []
+        if self._conn is None or not any((ping, iface, tcp, bw, events)):
             return
         try:
             with self._conn:
                 self._conn.execute("BEGIN")
-                if self._ping:
+                if ping:
                     self._conn.executemany(
-                        "INSERT INTO ping_raw VALUES (?,?,?,?,?,?)", self._ping)
-                if self._iface:
+                        "INSERT INTO ping_raw VALUES (?,?,?,?,?,?)", ping)
+                if iface:
                     self._conn.executemany(
-                        "INSERT INTO iface_raw VALUES (?,?,?,?,?,?,?,?,?,?)", self._iface)
-                if self._tcp:
+                        "INSERT INTO iface_raw VALUES (?,?,?,?,?,?,?,?,?,?)", iface)
+                if tcp:
                     self._conn.executemany(
-                        "INSERT INTO tcp_sample VALUES (?,?,?,?,?,?,?)", self._tcp)
-                if self._bw:
+                        "INSERT INTO tcp_sample VALUES (?,?,?,?,?,?,?)", tcp)
+                if bw:
                     self._conn.executemany(
-                        "INSERT INTO bandwidth_sample VALUES (?,?,?,?,?,?,?,?)", self._bw)
-                if self._events:
+                        "INSERT INTO bandwidth_sample VALUES (?,?,?,?,?,?,?,?)", bw)
+                if events:
                     self._conn.executemany(
-                        "INSERT INTO event VALUES (?,?,?,?)", self._events)
+                        "INSERT INTO event VALUES (?,?,?,?)", events)
         except sqlite3.Error as exc:
             self.last_error = str(exc)
             log.warning("flush failed, dropping %d buffered rows: %s",
-                        len(self._ping) + len(self._iface), exc)
-        finally:
-            self._drop_buffers()
-
-    def _drop_buffers(self) -> None:
-        self._ping.clear()
-        self._iface.clear()
-        self._tcp.clear()
-        self._bw.clear()
-        self._events.clear()
+                        len(ping) + len(iface), exc)
 
     # -- maintenance -------------------------------------------------------- #
 
     @_locked
     def rollup(self, now: float | None = None) -> None:
-        """Fold completed minutes of raw samples into the per-minute tables.
+        """Fold newly completed minutes of raw samples into the per-minute tables.
 
-        Idempotent: re-aggregating a minute that is already present just
-        rewrites it, which is what makes ``purge`` safe to run afterwards.
+        Only minutes past the last rollup (less a small overlap) are read, so the
+        cost stays flat however much raw data is being retained. Re-aggregating a
+        minute that is already present just rewrites it, so the overlap is safe.
         """
         if self._conn is None:
             return
         now = now or time.time()
         cur_min = int(now // 60)
         try:
+            if self._rolled_min is None:
+                # Whichever table is further behind decides where to resume.
+                self._rolled_min = min(self._conn.execute(
+                    f"SELECT COALESCE(MAX(minute), -1) FROM {table}").fetchone()[0]
+                    for table in ("ping_minute", "iface_minute"))
+            bounds = ((self._rolled_min - ROLLUP_OVERLAP_MIN) * 60.0, cur_min * 60.0)
             with self._conn:
+                self._conn.execute("BEGIN")
                 self._conn.execute(
                     """INSERT OR REPLACE INTO ping_minute
                          SELECT CAST(ts / 60 AS INTEGER) AS minute, target,
                                 COUNT(*), SUM(sent), SUM(lost),
                                 AVG(rtt_ms), MIN(rtt_ms), MAX(rtt_ms), AVG(jitter_ms)
                            FROM ping_raw
-                          WHERE CAST(ts / 60 AS INTEGER) < ?
-                       GROUP BY minute, target""", (cur_min,))
+                          WHERE ts >= ? AND ts < ?
+                       GROUP BY minute, target""", bounds)
                 self._conn.execute(
                     """INSERT OR REPLACE INTO iface_minute
                          SELECT CAST(ts / 60 AS INTEGER) AS minute, iface,
@@ -262,8 +278,9 @@ class Storage:
                                 SUM(err_in), SUM(err_out), SUM(drop_in), SUM(drop_out),
                                 SUM(pkt_in), SUM(pkt_out)
                            FROM iface_raw
-                          WHERE CAST(ts / 60 AS INTEGER) < ?
-                       GROUP BY minute, iface""", (cur_min,))
+                          WHERE ts >= ? AND ts < ?
+                       GROUP BY minute, iface""", bounds)
+            self._rolled_min = cur_min - 1
         except sqlite3.Error as exc:
             self.last_error = str(exc)
             log.warning("rollup failed: %s", exc)
@@ -279,6 +296,7 @@ class Storage:
         bw_cut = now - BANDWIDTH_RETENTION_DAYS * 86400
         try:
             with self._conn:
+                self._conn.execute("BEGIN")
                 # Only delete raw rows whose minute made it into the rollup.
                 rolled = self._conn.execute(
                     "SELECT COALESCE(MAX(minute), -1) FROM ping_minute").fetchone()[0]
@@ -371,6 +389,34 @@ class Storage:
         except sqlite3.Error:
             return []
         return [{"ts": r[0], "kind": r[1], "target": r[2], "detail": r[3]} for r in rows]
+
+    @_locked
+    def outage_count(self, target: str, window_s: float,
+                     now: float | None = None) -> int | None:
+        """How many outages began on ``target`` within ``window_s``."""
+        if self._conn is None:
+            return None
+        since = (now or time.time()) - window_s
+        try:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM event WHERE kind = 'down' AND target = ? AND ts >= ?",
+                (target, since)).fetchone()[0]
+        except sqlite3.Error:
+            return None
+
+    @_locked
+    def last_outage_seconds(self, target: str) -> float | None:
+        """Duration of the most recent outage on ``target`` that has ended."""
+        if self._conn is None:
+            return None
+        try:
+            row = self._conn.execute(
+                """SELECT detail FROM event WHERE kind = 'up' AND target = ?
+                 ORDER BY ts DESC LIMIT 1""", (target,)).fetchone()
+        except sqlite3.Error:
+            return None
+        match = re.search(r"after (\d+)s", row[0]) if row and row[0] else None
+        return float(match.group(1)) if match else None
 
     def db_size_bytes(self) -> int:
         total = 0

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import getpass
+import glob
+import os
 import socket
 import struct
 import time
@@ -11,6 +14,8 @@ import time
 # --------------------------------------------------------------------------- #
 
 _ROUTE_FILE = "/proc/net/route"
+_MOUNTS_FILE = "/proc/mounts"
+_EXT4_DIR = "/sys/fs/ext4"
 
 
 def default_route() -> tuple[str | None, str | None]:
@@ -59,9 +64,145 @@ def pick_interface(preferred: str = "auto") -> str | None:
         stats = psutil.net_if_stats()
     except OSError:
         return None
-    for name, st in stats.items():
-        if st.isup and not name.startswith(("lo", "docker", "veth", "br-")):
-            return name
+    # No route yet (early boot, say). A NIC that already has an address is a far
+    # better guess than one that is merely up.
+    up = [name for name, st in stats.items()
+          if st.isup and not name.startswith(("lo", "docker", "veth", "br-"))]
+    return next((name for name in up if iface_ipv4(name)), up[0] if up else None)
+
+
+def iface_ipv4(name: str | None) -> str | None:
+    """First IPv4 address on ``name``, or ``None`` if it has none (yet)."""
+    if not name:
+        return None
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        addrs = psutil.net_if_addrs().get(name, [])
+    except OSError:
+        return None
+    return next((a.address for a in addrs if a.family == socket.AF_INET), None)
+
+
+def connection_type(name: str | None) -> str:
+    """A plain name for the kind of link an interface is."""
+    if not name:
+        return "not connected"
+    if os.path.isdir(f"/sys/class/net/{name}/wireless") or name.startswith("wl"):
+        return "Wi-Fi"
+    if name.startswith(("eth", "en")):
+        return "Ethernet"
+    return name
+
+
+def local_user() -> str:
+    """The login name netmon runs as: the user to ssh in with."""
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return "?"
+
+
+def link_is_up(name: str) -> bool | None:
+    """Carrier state from sysfs; ``None`` when the kernel does not know."""
+    try:
+        with open(f"/sys/class/net/{name}/operstate", "r", encoding="ascii") as fh:
+            state = fh.read().strip()
+    except OSError:
+        return None
+    if state == "up":
+        return True
+    return None if state == "unknown" else False
+
+
+def wifi_signal_dbm(name: str) -> float | None:
+    """Signal level from /proc/net/wireless; ``None`` for a wired interface."""
+    try:
+        with open("/proc/net/wireless", "r", encoding="ascii") as fh:
+            lines = fh.read().splitlines()[2:]
+    except OSError:
+        return None
+    for line in lines:
+        # iface: status link level noise ...
+        f = line.split()
+        if len(f) >= 4 and f[0].rstrip(":") == name:
+            try:
+                level = float(f[3].rstrip("."))
+            except ValueError:
+                return None
+            return level if level < 0 else None
+    return None
+
+
+def read_cpu_temp() -> float | None:
+    """SoC temperature in Celsius, or ``None`` where sysfs does not expose it."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r", encoding="ascii") as fh:
+            return int(fh.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
+
+def list_framebuffers() -> list[str]:
+    """Framebuffers the kernel knows about, as ``fb0 vc4drmfb 800x480``."""
+    out = []
+    for path in sorted(glob.glob("/sys/class/graphics/fb[0-9]*")):
+        try:
+            with open(f"{path}/name", "r", encoding="ascii") as fh:
+                name = fh.read().strip()
+            with open(f"{path}/virtual_size", "r", encoding="ascii") as fh:
+                size = fh.read().strip().replace(",", "x")
+        except OSError:
+            continue
+        out.append(f"{os.path.basename(path)} {name} {size}")
+    return out
+
+
+def root_filesystem() -> tuple[str | None, bool]:
+    """Return ``(device name, read-only?)`` for /, such as ``("mmcblk0p2", False)``.
+
+    A card that is failing often gets remounted read-only by the kernel.
+    """
+    try:
+        with open(_MOUNTS_FILE, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return (None, False)
+    # The last entry for / is the one in effect.
+    for line in reversed(lines):
+        f = line.split()
+        if len(f) >= 4 and f[1] == "/" and f[0] != "rootfs":
+            return (os.path.basename(f[0]), "ro" in f[3].split(","))
+    return (None, False)
+
+
+def ext4_stats(device: str | None) -> dict | None:
+    """Write totals and error count that ext4 keeps for a filesystem.
+
+    ``lifetime_kb`` is stored on disk, so it survives reboots and counts every
+    write since the filesystem was created. ``None`` if / is not ext4.
+    """
+    names = [device] if device else []
+    try:
+        # The mount table can say /dev/root; with a single filesystem, that is it.
+        found = [n for n in os.listdir(_EXT4_DIR) if n != "features"]
+    except OSError:
+        return None
+    if not (device and device in found):
+        names = found if len(found) == 1 else []
+    for name in names:
+        try:
+            out = {}
+            for key, filename in (("lifetime_kb", "lifetime_write_kbytes"),
+                                  ("session_kb", "session_write_kbytes"),
+                                  ("errors", "errors_count")):
+                with open(f"{_EXT4_DIR}/{name}/{filename}", "r", encoding="ascii") as fh:
+                    out[key] = int(fh.read().strip())
+            return out
+        except (OSError, ValueError):
+            return None
     return None
 
 

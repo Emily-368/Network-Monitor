@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import threading
@@ -23,7 +24,7 @@ from .config import load_config
 from .state import LiveState
 from .storage import Storage
 from .util import (default_route, fmt_duration, fmt_mbps, fmt_ms, fmt_pct,
-                   pick_interface)
+                   iface_ipv4, list_framebuffers, pick_interface)
 
 log = logging.getLogger("netmon")
 
@@ -40,7 +41,7 @@ def _setup_logging(level: str) -> None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="netmon",
-        description="Real-time network monitor for a Raspberry Pi with a DSI panel.",
+        description="Real-time network monitor for a Raspberry Pi with a TFT panel.",
     )
     p.add_argument("-c", "--config", help="path to config.yaml")
     p.add_argument("--headless", action="store_true",
@@ -68,8 +69,12 @@ def _selftest(cfg) -> int:
 
     iface, gateway = default_route()
     print(f"  default route: iface={iface or '?'} gateway={gateway or '?'}")
-    print(f"  measuring on : {pick_interface(cfg.general.interface) or '(none found)'}")
+    measured = pick_interface(cfg.general.interface)
+    print(f"  measuring on : {measured or '(none found)'}"
+          f" address={iface_ipv4(measured) or 'none'}")
     print(f"  database     : {cfg.db_file()}")
+    print(f"  framebuffers : {'; '.join(list_framebuffers()) or 'none found'}")
+    print(f"  session      : {os.environ.get('XDG_SESSION_TYPE') or 'none'}")
 
     # Report which optional pieces are present before anything is attempted.
     for module, why in (("icmplib", "ICMP echo without root"),
@@ -111,6 +116,16 @@ def _selftest(cfg) -> int:
     c = snap["tcp"]
     print(f"    tcp connect  {fmt_ms(c['connect_ms'])} ms to {c['host']}:{c['port']}"
           f"   retrans {fmt_pct(c['retrans_pct'])} %")
+    d = snap["dns"]
+    print(f"    dns lookup   {fmt_ms(d['ms'])} ms for {d['host']}"
+          f"{'' if d['ms'] is not None else '   ' + str(d['last_error'])}")
+    s = snap["system"]
+    print(f"    the Pi       temp {s['temp_c'] if s['temp_c'] is not None else '--'} C"
+          f"   {s['power_text'] or 'power unknown (no vcgencmd)'}")
+    print(f"    SD card      used {fmt_pct(s['sd_used_pct'], 1)} %"
+          f"   wear estimate {fmt_pct(s['sd_wear_pct'], 2)} %"
+          f"   errors {s['sd_errors'] if s['sd_errors'] is not None else '--'}"
+          f"{'   READ-ONLY' if s['sd_readonly'] else ''}")
 
     failed = [n for n, r in results.items() if not r.get("ok")]
     unreachable = [t["name"] for t in snap["targets"] if not t["alive"]]

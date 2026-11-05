@@ -12,7 +12,7 @@ general:
   raw_retention_hours: 6
   # Per-minute rollups are kept this long (used for 24 h availability, trends).
   retention_days: 30
-  # Samples held in RAM per series (180 @ 1 Hz = 3 min of detail on screen).
+  # Samples held in RAM per series (1800 @ 1 Hz = the 30 min chart window).
   history_points: 1800
 
 # What to ping. "auto" resolves to the default gateway.
@@ -20,7 +20,7 @@ general:
 targets:
   - { name: Gateway,  host: auto,     primary: false }
   - { name: Internet, host: 1.1.1.1,  primary: true  }
-  - { name: DNS alt,  host: 8.8.8.8,  primary: false }
+  - { name: Google,   host: 8.8.8.8,  primary: false }
 
 probes:
   ping:
@@ -42,27 +42,42 @@ probes:
     port: 443
     timeout: 3.0
 
+  dns:
+    enabled: true
+    interval: 15.0         # a real lookup through the system resolver
+    host: cloudflare.com
+    timeout: 3.0
+
+  system:
+    interval: 10.0         # Pi temperature, power, CPU, RAM, SD card
+    # For the SD wear estimate: how many times the whole card can be rewritten.
+    # A rough allowance for a consumer card, including the card's own extra
+    # internal writes. Check your card's rating; high-endurance cards last longer.
+    sd_rated_cycles: 500
+
   bandwidth:
     enabled: true
     method: speedtest      # speedtest | iperf3 | none
-    interval: 3600.0       # a capacity test saturates the link - keep it rare
+    # A capacity test saturates the link and shows up as latency: keep it rare.
+    # Tap the header on the panel to run one on demand.
+    interval: 86400.0
     run_at_start: false
-    threads: 2             # speedtest: cap CPU/RAM on a Pi 3B+
+    threads: 2             # speedtest: cap CPU/RAM on a Pi 3B
     iperf3_server: ""      # e.g. 192.168.1.50
     iperf3_port: 5201
     iperf3_duration: 5
 
 ui:
   fullscreen: true
-  width: 800               # 5" DSI panels are usually 800x480
+  width: 800               # DFR0550-V2 panel; the layout needs at least 800x480
   height: 480
-  refresh_ms: 500
+  refresh_ms: 1000         # the probes run at 1 Hz; redrawing faster shows nothing new
   hide_cursor: true
   # Starting time window for the charts; tap the screen or press 1-4 to cycle.
   window_seconds: 180
   windows: [60, 180, 600, 1800]
   # Fallback link capacity (Mbps) until a bandwidth test has run.
-  # Pi 3B+ note: its NIC shares the USB 2.0 bus, so ~300 Mbps is the ceiling.
+  # Pi 3B note: its Ethernet is 100 Mbps (~94 real) and shares the USB 2.0 bus.
   link_capacity_mbps: 100
 
 thresholds:
@@ -70,7 +85,8 @@ thresholds:
   latency_crit_ms: 120
   jitter_warn_ms: 10
   jitter_crit_ms: 30
-  loss_warn_pct: 1.0
+  # With 1 echo a second over 60 s, one lost echo is 1.67 %: warn from two.
+  loss_warn_pct: 2.0
   loss_crit_pct: 5.0
   tcp_warn_ms: 150
   tcp_crit_ms: 500
@@ -82,3 +98,16 @@ thresholds:
   util_crit_pct: 90.0
   avail_warn_pct: 99.5
   avail_crit_pct: 99.0
+  # Wi-Fi signal, when the measured interface is wireless.
+  signal_warn_dbm: -70
+  signal_crit_dbm: -80
+  # Pi SoC temperature; the firmware starts throttling at 80 C.
+  temp_warn_c: 70
+  temp_crit_c: 80
+  ram_warn_pct: 85
+  ram_crit_pct: 95
+  # SD card: how full it is, and the estimated share of its write life used.
+  sd_used_warn_pct: 85
+  sd_used_crit_pct: 95
+  sd_wear_warn_pct: 70
+  sd_wear_crit_pct: 90

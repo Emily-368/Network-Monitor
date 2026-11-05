@@ -151,7 +151,9 @@ class PingProbe:
                 rtts = [float(m.group(1))] * n_recv
         return (rtts, count, None if rtts else "timeout")
 
-    async def _echo(self, host: str) -> tuple[list[float], int, str | None]:
+    async def _echo(self, host: str | None) -> tuple[list[float], int, str | None]:
+        if host is None:    # "auto" target with no default route right now
+            return ([], self.pcfg.count, "no route")
         if self.backend == "icmplib":
             return await self._echo_icmplib(host)
         return await self._echo_system(host)
@@ -181,11 +183,9 @@ class PingProbe:
                 if outcome["event"]:
                     kind, detail = outcome["event"]
                     self.storage.add_event(ts, kind, target.name, detail)
-                    self.state.events.append({"ts": ts, "kind": kind,
-                                              "target": target.name, "detail": detail})
-                    del self.state.events[:-30]
+                    self.state.note_event(ts, kind, target.name, detail)
                     log.info("%s", detail)
-                if err and err not in ("timeout",):
+                if err and err not in ("timeout", "no route"):
                     self.state.note_error(f"ping {target.name}: {err}")
 
         self.state.beat(ts)

@@ -4,6 +4,8 @@ Each probe gets its own task with its own cadence, so the 1 Hz latency round is
 never held up by a 30-second capacity test. A separate maintenance task does the
 SQLite housekeeping (flush, rollup, purge) and recomputes the availability
 figures, which are the only numbers that come from the database rather than RAM.
+That work runs in a worker thread: an SD card can stall for seconds, and doing it
+on the event loop would stall the 1 Hz probes with it.
 
 A tick that overruns its interval is logged and the next one starts
 immediately - the schedule drifts rather than piling up tasks, which is the
@@ -17,7 +19,8 @@ import logging
 import threading
 import time
 
-from .probes import BandwidthProbe, IfaceProbe, PingProbe, TcpProbe
+from .probes import (BandwidthProbe, DnsProbe, IfaceProbe, PingProbe,
+                     SystemProbe, TcpProbe)
 from .state import LiveState
 from .storage import Storage
 from .util import default_route
@@ -26,6 +29,7 @@ log = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 5.0        # seconds between SQLite commits
 MAINTENANCE_INTERVAL = 30.0  # availability recompute + rollup/purge cadence
+ROUTE_INTERVAL = 5.0        # how often "host: auto" follows the default route
 
 
 class Collector(threading.Thread):
@@ -52,21 +56,23 @@ class Collector(threading.Thread):
     # -- target resolution -------------------------------------------------- #
 
     def _resolve_targets(self) -> None:
-        """Turn ``host: auto`` into the real default gateway."""
-        iface, gateway = default_route()
+        """Turn ``host: auto`` into the current default gateway.
+
+        Called repeatedly, because the dashboard can start before the network is
+        up and a DHCP renewal can move the gateway. With no route the target has
+        no host at all and reads as failing, which is the truth of the situation.
+        """
+        _, gateway = default_route()
         for target in self.state.targets.values():
             if target.host != "auto":
                 target.resolved_host = target.host
-                continue
-            if gateway:
+            elif gateway != target.resolved_host:
                 target.resolved_host = gateway
-                log.info("target %r -> default gateway %s", target.name, gateway)
-            else:
-                target.resolved_host = "127.0.0.1"
-                log.warning("target %r is 'auto' but no default route was found; "
-                            "pinging loopback instead - set an explicit host",
-                            target.name)
-                self.state.note_error(f"{target.name}: no default gateway")
+                if gateway:
+                    log.info("target %r -> default gateway %s", target.name, gateway)
+                else:
+                    log.warning("target %r is 'auto' but there is no default route",
+                                target.name)
 
     # -- thread body -------------------------------------------------------- #
 
@@ -91,9 +97,12 @@ class Collector(threading.Thread):
             PingProbe(self.cfg, self.state, self.storage),
             IfaceProbe(self.cfg, self.state, self.storage),
             TcpProbe(self.cfg, self.state, self.storage),
+            DnsProbe(self.cfg, self.state, self.storage),
+            SystemProbe(self.cfg, self.state, self.storage),
             BandwidthProbe(self.cfg, self.state, self.storage),
         ]
         self._restore_last_bandwidth()
+        self._restore_outages()
         self.ready.set()
         log.info("collector started: %s", ", ".join(
             f"{p.name}@{p.interval:g}s" for p in self.probes))
@@ -121,6 +130,16 @@ class Collector(threading.Thread):
             self.state.bandwidth.record({**last, "ok": True})
         log.info("restored last bandwidth result from %s",
                  time.strftime("%Y-%m-%d %H:%M", time.localtime(last["ts"])))
+
+    def _restore_outages(self) -> None:
+        """Bring back recent events and the last outage, which live on disk."""
+        events = self.storage.recent_events(30)
+        durations = {t.name: self.storage.last_outage_seconds(t.name)
+                     for t in self.state.targets.values()}
+        with self.state.lock:
+            self.state.events = list(reversed(events))
+            for target in self.state.targets.values():
+                target.last_outage_duration = durations[target.name]
 
     # -- scheduling --------------------------------------------------------- #
 
@@ -162,6 +181,7 @@ class Collector(threading.Thread):
         loop = asyncio.get_running_loop()
         next_flush = loop.time() + FLUSH_INTERVAL
         next_maint = loop.time() + 5.0
+        next_route = loop.time() + ROUTE_INTERVAL
 
         while not self._stop_async.is_set():
             try:
@@ -171,28 +191,36 @@ class Collector(threading.Thread):
                 pass
 
             now_mono = loop.time()
+            if now_mono >= next_route:
+                next_route = now_mono + ROUTE_INTERVAL
+                self._resolve_targets()
+
             if now_mono >= next_flush:
                 next_flush = now_mono + FLUSH_INTERVAL
                 try:
-                    self.storage.flush()
+                    await asyncio.to_thread(self.storage.flush)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("flush failed: %s", exc)
 
             if now_mono >= next_maint:
                 next_maint = now_mono + MAINTENANCE_INTERVAL
                 try:
-                    self._update_availability()
+                    await asyncio.to_thread(self._housekeeping)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("availability update failed: %s", exc)
+                    log.warning("housekeeping failed: %s", exc)
 
-                now = time.time()
-                if now - self._last_rollup >= 60.0:
-                    self._last_rollup = now
-                    self.storage.rollup(now)
-                    self.storage.purge(now)
-                    with self.state.lock:
-                        self.state.db_bytes = self.storage.db_size_bytes()
-                        self.state.db_error = self.storage.last_error
+    def _housekeeping(self) -> None:
+        """Worker thread. Everything here may block on the SD card."""
+        self._update_availability()
+        now = time.time()
+        if now - self._last_rollup >= 60.0:
+            self._last_rollup = now
+            self.storage.rollup(now)
+            self.storage.purge(now)
+            size = self.storage.db_size_bytes()
+            with self.state.lock:
+                self.state.db_bytes = size
+                self.state.db_error = self.storage.last_error
 
     def _update_availability(self) -> None:
         """Network availability = answered echoes / sent echoes, over 1 h and 24 h."""
@@ -200,9 +228,11 @@ class Collector(threading.Thread):
         for target in list(self.state.targets.values()):
             a1, n1 = self.storage.availability(target.name, 3600, now)
             a24, n24 = self.storage.availability(target.name, 86400, now)
+            outages = self.storage.outage_count(target.name, 86400, now)
             with self.state.lock:
                 target.avail_1h, target.avail_1h_n = a1, n1
                 target.avail_24h, target.avail_24h_n = a24, n24
+                target.outages_24h = outages
 
     # -- shutdown ----------------------------------------------------------- #
 
@@ -254,6 +284,8 @@ class Collector(threading.Thread):
             PingProbe(self.cfg, self.state, self.storage),
             IfaceProbe(self.cfg, self.state, self.storage),
             TcpProbe(self.cfg, self.state, self.storage),
+            DnsProbe(self.cfg, self.state, self.storage),
+            SystemProbe(self.cfg, self.state, self.storage),
         ]
         results = {}
         for probe in self.probes:

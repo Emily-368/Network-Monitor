@@ -1,9 +1,10 @@
 """Hand-drawn Tk canvas charts and tiles.
 
-No matplotlib: on a Pi 3B+ a matplotlib redraw costs tenths of a second and
+No matplotlib: on a Pi 3B a matplotlib redraw costs tenths of a second and
 tens of megabytes, and all that is needed here is a line, a band and some bars.
 Canvas items are pooled and updated with ``coords()`` rather than deleted and
-recreated, so a 2 Hz refresh does not churn the heap.
+recreated, so refreshing does not churn the heap. Text only reconfigures when it
+changes, because any reconfigure repaints, and that costs CPU on a Pi 3B.
 
 Charts bucket their samples into one column per ~2 px and draw a min/max range
 band behind a mean line, so a 30-minute window stays honest instead of
@@ -20,6 +21,13 @@ from . import theme as T
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def set_label(label: tk.Label, **options) -> None:
+    """Configure only what differs, so an unchanged label is not repainted."""
+    changed = {k: v for k, v in options.items() if str(label.cget(k)) != str(v)}
+    if changed:
+        label.configure(**changed)
 
 
 def nice_ceil(value: float) -> float:
@@ -107,6 +115,29 @@ class _Pool:
             self.canvas.itemconfigure(item, state="hidden")
 
 
+def _draw_spans(canvas: tk.Canvas, pool: _Pool, spans, t0: float, t1: float,
+                x0: float, x1: float, y_top: float, y_bot: float) -> None:
+    """Shade the capacity tests: the link was saturated on purpose just then."""
+    pool.begin()
+    if t1 > t0:
+        scale = (x1 - x0) / (t1 - t0)
+        for start, end in spans or ():
+            if end < t0 or start > t1:
+                continue
+            canvas.coords(pool.take(), x0 + (max(start, t0) - t0) * scale, y_top,
+                          x0 + (min(end, t1) - t0) * scale, y_bot)
+    pool.end()
+
+
+def _span_factory(canvas: tk.Canvas):
+    """A rectangle behind everything else on the canvas."""
+    def make() -> int:
+        item = canvas.create_rectangle(0, 0, 1, 1, fill=T.GRID, outline="")
+        canvas.tag_lower(item)
+        return item
+    return make
+
+
 # --------------------------------------------------------------------------- #
 # Charts
 # --------------------------------------------------------------------------- #
@@ -118,17 +149,16 @@ class LineChart(tk.Canvas):
     """One or more series as a mean line over a min/max band, zero-based."""
 
     def __init__(self, master, theme: T.Theme, series: list[tuple[str, str]],
-                 height: int = 86, show_axis: bool = True, show_legend_ticks: bool = True,
-                 **kw):
+                 height: int = 86, show_axis: bool = True, **kw):
         super().__init__(master, bg=T.PANEL, highlightthickness=0, bd=0,
                          height=height, **kw)
         self.theme = theme
         self.series = series            # [(label, hex colour), ...] in slot order
         self.show_axis = show_axis
-        self.show_legend_ticks = show_legend_ticks
         self._cw = 0
         self._ch = height
 
+        self._spans = _Pool(self, _span_factory(self))
         self._grid = _Pool(self, lambda: self.create_line(
             0, 0, 1, 0, fill=T.GRID, width=1))
         self._bands = [
@@ -165,7 +195,7 @@ class LineChart(tk.Canvas):
              t0: float, t1: float, ymax: float | None = None, y_floor: float = 1.0,
              fmt=lambda v: f"{v:g}", reference: float | None = None,
              reference_label: str = "", lost_ts: list[float] | None = None,
-             max_gap_s: float = 0.0) -> None:
+             max_gap_s: float = 0.0, spans=None) -> None:
         w = self._cw or self.winfo_width()
         h = self._ch or self.winfo_height()
         if w < 24 or h < 24:
@@ -199,6 +229,8 @@ class LineChart(tk.Canvas):
 
         def xpos(col: int) -> float:
             return x0 + (col + 0.5) / ncols * plot_w
+
+        _draw_spans(self, self._spans, spans, t0, t1, x0, x1, y_top, y_bot)
 
         # Recessive solid hairlines at 1/3 and 2/3 of the scale.
         self._grid.begin()
@@ -296,6 +328,7 @@ class BarChart(tk.Canvas):
         self.show_axis = show_axis
         self._cw = 0
         self._ch = height
+        self._spans = _Pool(self, _span_factory(self))
         self._grid = _Pool(self, lambda: self.create_line(
             0, 0, 1, 0, fill=T.GRID, width=1))
         self._bars = _Pool(self, lambda: self.create_rectangle(
@@ -312,7 +345,7 @@ class BarChart(tk.Canvas):
 
     def draw(self, ts: list[float], values: list[float | None], t0: float, t1: float,
              ymax: float | None = None, y_floor: float = 1.0,
-             fmt=lambda v: f"{v:g}", bar_px: int = 6) -> None:
+             fmt=lambda v: f"{v:g}", bar_px: int = 6, spans=None) -> None:
         w = self._cw or self.winfo_width()
         h = self._ch or self.winfo_height()
         if w < 24 or h < 24:
@@ -331,6 +364,8 @@ class BarChart(tk.Canvas):
             top = 1.0
         col_w = plot_w / ncols
         bar_w = max(1.0, col_w - 2.0)        # the 2 px gap
+
+        _draw_spans(self, self._spans, spans, t0, t1, x0, x1, y_top, y_bot)
 
         self._grid.begin()
         for frac in (1 / 3, 2 / 3):
@@ -376,7 +411,7 @@ class Tile(tk.Frame):
     """A panel with a status border, a title row, a hero value and a body area."""
 
     def __init__(self, master, theme: T.Theme, title: str, unit: str = "",
-                 hero_font=None, compact: bool = False, legend: str = ""):
+                 hero_font=None, compact: bool = False):
         super().__init__(master, bg=T.STATUS["none"], bd=0, highlightthickness=0)
         self.theme = theme
         self._level = "none"
@@ -393,11 +428,6 @@ class Tile(tk.Frame):
         self.chip = tk.Label(head, text="", bg=T.PANEL, fg=T.STATUS["none"],
                              font=theme.chip, anchor="e")
         self.chip.pack(side="right")
-        self.legend_lbl = None
-        if legend:
-            self.legend_lbl = tk.Label(head, text=legend, bg=T.PANEL, fg=T.MUTED,
-                                       font=theme.label, anchor="e")
-            self.legend_lbl.pack(side="right", padx=(0, 8))
 
         value_row = tk.Frame(self.inner, bg=T.PANEL)
         value_row.pack(fill="x", padx=6, pady=(0, 0))
@@ -427,7 +457,7 @@ class Tile(tk.Frame):
             self.configure(bg=T.status_color(lv))
             self.chip.configure(fg=T.status_color(lv))
         # Colour is never the only channel: the chip always spells it out.
-        self.chip.configure(text=f"● {T.status_text(lv)}" if show_text else "")
+        set_label(self.chip, text=f"● {T.status_text(lv)}" if show_text else "")
 
     def set_value(self, text: str, sub: str = "", aux: str = "") -> None:
         if self.value_lbl.cget("text") != text:
@@ -453,16 +483,20 @@ class CapacityMeter(tk.Canvas):
     colours of the lines above.
     """
 
-    ROW_H = 13
+    ROW_H = 14
     LABEL_W = 24
 
     def __init__(self, master, theme: T.Theme, rows: list[tuple[str, str]],
-                 warn_pct: float = 70.0, **kw):
+                 warn_pct=70.0, label_w: int = LABEL_W, value_w: int = 54, **kw):
         super().__init__(master, bg=T.PANEL, highlightthickness=0, bd=0,
                          height=self.ROW_H * len(rows), **kw)
         self.theme = theme
         self.rows = rows
-        self.warn_pct = warn_pct
+        # One warning mark for every row, or a list with one per row.
+        self.warn_pcts = (warn_pct if isinstance(warn_pct, (list, tuple))
+                          else [warn_pct] * len(rows))
+        self.label_w = label_w
+        self.value_w = value_w
         self._cw = 0
         self._items = []
         for label, color in rows:
@@ -481,8 +515,8 @@ class CapacityMeter(tk.Canvas):
         w = self._cw or self.winfo_width()
         if w < 60:
             return
-        bar_x0 = self.LABEL_W
-        bar_x1 = max(bar_x0 + 20, w - 54)
+        bar_x0 = self.label_w
+        bar_x1 = max(bar_x0 + 20, w - self.value_w)
         bar_w = bar_x1 - bar_x0
 
         for i, item in enumerate(self._items):
@@ -495,7 +529,7 @@ class CapacityMeter(tk.Canvas):
             # Keep a 1 px sliver so a live-but-tiny flow never reads as zero.
             end = bar_x0 + max(1.0 if pct else 0.0, frac * bar_w)
             self.coords(item["fill"], bar_x0, top, end, bot)
-            tick_x = bar_x0 + bar_w * max(0.0, min(1.0, self.warn_pct / 100.0))
+            tick_x = bar_x0 + bar_w * max(0.0, min(1.0, self.warn_pcts[i] / 100.0))
             self.coords(item["tick"], tick_x, top - 2, tick_x, bot + 2)
             self.coords(item["value"], w - 2, y)
             text = texts[i] if i < len(texts) else "--"
@@ -513,7 +547,8 @@ class Panel(tk.Frame):
         self.head = tk.Frame(self.inner, bg=T.PANEL)
         self.head.pack(fill="x", padx=6, pady=(3, 1))
         self.title_lbl = tk.Label(self.head, text=title.upper(), bg=T.PANEL,
-                                  fg=T.MUTED, font=theme.title, anchor="w")
+                                  fg=T.MUTED, font=theme.title, anchor="w",
+                                  bd=0, pady=0)
         self.title_lbl.pack(side="left")
         self.body = tk.Frame(self.inner, bg=T.PANEL)
         self.body.pack(fill="both", expand=True, padx=6, pady=(0, 4))
@@ -525,9 +560,9 @@ class StatRow(tk.Frame):
     def __init__(self, master, theme: T.Theme, label: str):
         super().__init__(master, bg=T.PANEL)
         tk.Label(self, text=label, bg=T.PANEL, fg=T.MUTED, font=theme.label,
-                 anchor="w").pack(side="left")
+                 anchor="w", bd=0, pady=0).pack(side="left")
         self.value = tk.Label(self, text="--", bg=T.PANEL, fg=T.INK2,
-                              font=theme.label, anchor="e")
+                              font=theme.label, anchor="e", bd=0, pady=0)
         self.value.pack(side="right")
 
     def set(self, text: str) -> None:
@@ -561,15 +596,16 @@ class TargetTable(tk.Frame):
         for col, (name, width, anchor) in enumerate(self.COLUMNS):
             self.grid_columnconfigure(col, weight=1 if col < 2 else 0)
             tk.Label(self, text=name, bg=T.PANEL, fg=T.MUTED, font=theme.table_head,
-                     anchor=anchor, width=width).grid(
+                     anchor=anchor, width=width, bd=0, pady=0).grid(
                 row=0, column=col, sticky="ew", padx=1, pady=(0, 1))
         self.cells: list[list[tk.Label]] = []
         for r in range(rows):
             row_cells = []
             bg = T.PANEL if r % 2 == 0 else T.PANEL_ALT
             for col, (_, width, anchor) in enumerate(self.COLUMNS):
+                # No label padding: on this panel it costs the charts 16 px.
                 lbl = tk.Label(self, text="", bg=bg, fg=T.INK2, font=theme.table,
-                               anchor=anchor, width=width)
+                               anchor=anchor, width=width, bd=0, pady=0)
                 lbl.grid(row=r + 1, column=col, sticky="ew", padx=1)
                 row_cells.append(lbl)
             self.cells.append(row_cells)
@@ -583,5 +619,5 @@ class TargetTable(tk.Frame):
             if cell.cget("text") != text:
                 cell.configure(text=text)
         # Identity in the first column, state in the last; the rest stays ink.
-        row[0].configure(fg=T.INK if primary else T.INK2)
-        row[-1].configure(fg=T.status_color(level))
+        set_label(row[0], fg=T.INK if primary else T.INK2)
+        set_label(row[-1], fg=T.status_color(level))
