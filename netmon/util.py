@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import glob
 import os
 import socket
@@ -83,6 +84,25 @@ def iface_ipv4(name: str | None) -> str | None:
     except OSError:
         return None
     return next((a.address for a in addrs if a.family == socket.AF_INET), None)
+
+
+def connection_type(name: str | None) -> str:
+    """A plain name for the kind of link an interface is."""
+    if not name:
+        return "not connected"
+    if os.path.isdir(f"/sys/class/net/{name}/wireless") or name.startswith("wl"):
+        return "Wi-Fi"
+    if name.startswith(("eth", "en")):
+        return "Ethernet"
+    return name
+
+
+def local_user() -> str:
+    """The login name netmon runs as: the user to ssh in with."""
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return "?"
 
 
 def link_is_up(name: str) -> bool | None:

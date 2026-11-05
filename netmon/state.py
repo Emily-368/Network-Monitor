@@ -15,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
-from .util import mean, percentile
+from .util import connection_type, local_user, mean, percentile
 
 # A sample is (ts, value); value is None when the measurement failed.
 # Optional, not "float | None": this line runs at import, and Bullseye is Python 3.9.
@@ -260,6 +260,7 @@ class IfaceState:
         return {
             "name": self.name,
             "ip": self.ip,
+            "connection": connection_type(self.name),
             "link_up": self.link_up,
             "signal_dbm": self.signal_dbm,
             "speed_mbps": self.speed_mbps,
@@ -456,6 +457,7 @@ class LiveState:
         self._lock = threading.RLock()
         self.cfg = cfg
         self.hostname = socket.gethostname()
+        self.username = local_user()
         self.started_at = time.time()
         self.targets: dict[str, TargetState] = {}
         for t in cfg.targets:
@@ -513,6 +515,7 @@ class LiveState:
                 "now": now,
                 "window_s": window_s,
                 "hostname": self.hostname,
+                "username": self.username,
                 "uptime_s": now - self.started_at,
                 "collector_ts": self.collector_ts,
                 "stale": (now - self.collector_ts) > stale_after if self.collector_ts else True,

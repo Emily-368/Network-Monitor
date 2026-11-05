@@ -3,18 +3,18 @@
 Layout, for the 5" 800x480 DSI panel (DFRobot DFR0550-V2):
 
     +----------------------------------------------------------------+
-    | host/iface   | VERDICT (what is wrong and whose problem) | clock |
-    | IP address   | detail                                    |       |
+    | VERDICT (what is wrong and whose problem)  detail  | window clock |
     +------------------+------------------+--------------------------+
-    | LATENCY          | PI HEALTH + SD   | THROUGHPUT vs capacity   |
+    | PI HEALTH + SD   | LATENCY          | THROUGHPUT vs capacity   |
+    | user@host, IP    |                  |                          |
     +------------------+------------------+--------------------------+
     | JITTER | TCP | DNS | LINK + errors | AVAILABILITY | PACKET LOSS |
     +----------------------------------------------------------------+
     | per-target table + latest event                                |
     +----------------------------------------------------------------+
 
-Latency and throughput get charts in the top row, beside the Pi's own health; the
-rest are compact readouts. Every charted value is also in the table, so the
+The Pi's own health and address come first in the top row, then latency and
+throughput with their charts; the rest are compact readouts. Every charted value is also in the table, so the
 screen is readable when the TFT's viewing angle washes the colours out.
 
 Tap the header for the touch menu; tap anywhere else to change the time window.
@@ -101,7 +101,8 @@ class Dashboard:
         outer = tk.Frame(self.root, bg=T.PAGE)
         outer.pack(fill="both", expand=True, padx=4, pady=4)
         # The charts take whatever the fixed-height rows leave over.
-        outer.grid_rowconfigure(0, weight=0)
+        # Tall enough to stay an easy target: tapping the header opens the menu.
+        outer.grid_rowconfigure(0, weight=0, minsize=30)
         outer.grid_rowconfigure(1, weight=1, minsize=150)
         outer.grid_rowconfigure(2, weight=0)
         outer.grid_rowconfigure(3, weight=0)
@@ -111,31 +112,19 @@ class Dashboard:
         head = tk.Frame(outer, bg=T.PAGE)
         self.head = head
         head.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
-        head.grid_columnconfigure(0, weight=1, uniform="h")
-        head.grid_columnconfigure(1, weight=2, uniform="h")
-        head.grid_columnconfigure(2, weight=1, uniform="h")
-
-        # Stacked, and big enough to read off the panel to type into ssh.
-        who = tk.Frame(head, bg=T.PAGE)
-        who.grid(row=0, column=0, sticky="w")
-        self.hdr_host = tk.Label(who, text="", bg=T.PAGE, fg=T.INK2, font=th.host,
-                                 anchor="w", bd=0, pady=0)
-        self.hdr_host.pack(fill="x")
-        self.hdr_ip = tk.Label(who, text="", bg=T.PAGE, fg=T.INK, font=th.address,
-                               anchor="w", bd=0, pady=0)
-        self.hdr_ip.pack(fill="x")
+        head.grid_columnconfigure(0, weight=1)
 
         mid = tk.Frame(head, bg=T.PAGE)
-        mid.grid(row=0, column=1)
+        mid.grid(row=0, column=0, sticky="w")
         self.hdr_state = tk.Label(mid, text="", bg=T.PAGE, fg=T.INK2, font=th.verdict,
                                   bd=0, pady=0)
-        self.hdr_state.pack()
+        self.hdr_state.pack(side="left")
         self.hdr_detail = tk.Label(mid, text="", bg=T.PAGE, fg=T.INK2, font=th.label,
                                    bd=0, pady=0)
-        self.hdr_detail.pack()
+        self.hdr_detail.pack(side="left", padx=(10, 0))
 
         right = tk.Frame(head, bg=T.PAGE)
-        right.grid(row=0, column=2, sticky="e")
+        right.grid(row=0, column=1, sticky="e")
         self.hdr_window = tk.Label(right, text="", bg=T.PAGE, fg=T.MUTED, font=th.label)
         self.hdr_window.pack(side="left", padx=(0, 8))
         self.hdr_clock = tk.Label(right, text="", bg=T.PAGE, fg=T.INK, font=th.clock)
@@ -149,13 +138,27 @@ class Dashboard:
             prime.grid_columnconfigure(col, weight=1, uniform="p")
 
         self.t_latency = Tile(prime, th, "Latency", unit="ms")
-        self.t_latency.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        self.t_latency.grid(row=0, column=1, sticky="nsew", padx=4)
         self.c_latency = LineChart(self.t_latency.body, th,
                                    [("rtt", T.SERIES["blue"])], height=60)
         self.c_latency.pack(fill="both", expand=True)
 
-        self.t_pi = Tile(prime, th, "Pi health", unit="°C")
-        self.t_pi.grid(row=0, column=1, sticky="nsew", padx=4)
+        self.t_pi = Tile(prime, th, "Pi health", unit="°C", hero_font=th.hero_sm)
+        self.t_pi.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        # Above the readings, and big enough to read off the panel to type into ssh.
+        who = tk.Frame(self.t_pi.inner, bg=T.PANEL)
+        who.pack(fill="x", padx=6, before=self.t_pi.value_lbl.master)
+        who_top = tk.Frame(who, bg=T.PANEL)
+        who_top.pack(fill="x")
+        self.pi_conn = tk.Label(who_top, text="", bg=T.PANEL, fg=T.INK2, font=th.label,
+                                anchor="e", bd=0, pady=0)
+        self.pi_conn.pack(side="right")
+        self.pi_host = tk.Label(who_top, text="", bg=T.PANEL, fg=T.INK2, font=th.host,
+                                anchor="w", bd=0, pady=0)
+        self.pi_host.pack(side="left")
+        self.pi_ip = tk.Label(who, text="", bg=T.PANEL, fg=T.INK, font=th.address,
+                              anchor="w", bd=0, pady=0)
+        self.pi_ip.pack(fill="x")
         pi_color = T.SERIES["magenta"]
         self.m_pi = CapacityMeter(
             self.t_pi.body, th,
@@ -364,15 +367,10 @@ class Dashboard:
         self._render_bandwidth(iface, bw, t0, t1, stale, spans)
         self._render_compact(primary, iface, tcp, snap, t0, t1, stale)
         self._render_table(snap)
-        self._render_pi(snap["system"], stale)
+        self._render_pi(snap, stale)
         self._render_footer(snap, tcp)
 
     def _render_header(self, snap) -> None:
-        iface_name = snap["iface"]["name"] or "no iface"
-        set_label(self.hdr_host, text=f"{snap['hostname']} · {iface_name}")
-        ip = snap["iface"]["ip"]
-        set_label(self.hdr_ip, text=ip or "no IP address",
-                  fg=T.INK if ip else T.STATUS["warn"])
         set_label(self.hdr_clock, text=fmt_clock(snap["now"]))
         set_label(self.hdr_window, text=_fmt_window(self.window_s))
 
@@ -620,9 +618,18 @@ class Dashboard:
                 state,
             ], lv, primary=bool(t.get("primary")))
 
-    def _render_pi(self, system, stale) -> None:
+    def _render_pi(self, snap, stale) -> None:
         th = self.th
         tile = self.t_pi
+        system = snap["system"]
+
+        # Shown even if the collector stalls: that is when you need to ssh in.
+        ip = snap["iface"]["ip"]
+        set_label(self.pi_host, text=f"{snap['username']}@{snap['hostname']}")
+        set_label(self.pi_conn, text=snap["iface"]["connection"])
+        set_label(self.pi_ip, text=ip or "no IP address",
+                  fg=T.INK if ip else T.STATUS["warn"])
+
         if stale:
             tile.set_level("none")
             tile.set_value("--")

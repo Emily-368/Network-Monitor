@@ -6,16 +6,17 @@ Python, Tkinter, SQLite. No browser, no Grafana, no Docker — it has to live
 inside 1 GB of RAM and leave the link it is measuring alone.
 
 ```
-raspberrypi · eth0                ● ONLINE                          3m  16:43:49
-192.168.1.50                  Internet (1.1.1.1)
-┌── LATENCY ──────── OK ─┬── PI HEALTH ────── OK ─┬── THROUGHPUT ───────────── OK ─┐
-│ 18.8 ms      Internet  │ 52 °C        up 3d 4h  │ 0.781 Mbps in          ↑ 0.621 │
-│ avg 19.1 p95 42.7 …    │ power OK · SD OK       │ cap 94↓ 11.8↑ NIC limit · 3h   │
-│ ╭─╮                    │ cpu      ██░░░░   12%  │ ───╮                            │
-│ ─╯ ╰──────────         │ ram      ███░░░   38%  │    ╰─────────                   │
-│   ▮  ▮▮      ▮ (loss)  │ sd       ██░░░░ 21G free│ in  ▌░░░░░░░░░ 0.8%            │
-│                        │ wear est ▌░░░░░   0.4% │ out ██░░░░░░░░ 5.3%            │
-│                        │ SD written  64G, 1G/day│                                 │
+● ONLINE  Internet (1.1.1.1)                                      3m  16:43:49
+┌── PI HEALTH ────── OK ─┬── LATENCY ──────── OK ─┬── THROUGHPUT ───────────── OK ─┐
+│ pi@raspberrypi Ethernet│ 18.8 ms      Internet  │ 0.781 Mbps in          ↑ 0.621 │
+│ 192.168.1.50           │ avg 19.1 p95 42.7 …    │ cap 94↓ 11.8↑ NIC limit · 3h   │
+│ 52 °C        up 3d 4h  │ ╭─╮                    │ ───╮                            │
+│ power OK · SD OK       │ ─╯ ╰──────────         │    ╰─────────                   │
+│ cpu      ██░░░░   12%  │   ▮  ▮▮      ▮ (loss)  │ in  ▌░░░░░░░░░ 0.8%            │
+│ ram      ███░░░   38%  │                        │ out ██░░░░░░░░ 5.3%            │
+│ sd       ██░░░░ 21G free                        │                                 │
+│ wear est ▌░░░░░   0.4% │                        │                                 │
+│ SD written  64G, 1G/day│                        │                                 │
 ├── JITTER ─┬── TCP ───┬── DNS ───┬── LINK ───┬── AVAIL 24H ──┬── PACKET LOSS ───┤
 │ 2.4 ms    │ 28.5 ms  │ 24 ms    │ 100 Mbps  │ 99.974 %      │ 1.67 %   3 lost  │
 ├── TARGETS ───────────────────────────────────────────────────────────────────────┤
@@ -68,9 +69,7 @@ anywhere else** to change the time window. With a keyboard or over VNC: `←`/`�
 
 ## The header
 
-The top left shows the Pi's name, interface and IP address, so you can read off
-what to `ssh` to. The centre is one plain-English verdict. It walks outward from
-the Pi and reports the first thing broken, since everything beyond it is only
+The header is one plain-English verdict. It walks outward from the Pi and reports the first thing broken, since everything beyond it is only
 broken as a consequence:
 
 | Verdict | Meaning | Look at |
@@ -87,7 +86,9 @@ broken as a consequence:
 
 ## What it measures, and why these definitions
 
-Latency and throughput get charts in the top row, beside the Pi's own health.
+Latency and throughput get charts in the top row, beside the Pi's own health. The
+Pi health tile also shows `user@hostname`, the IP address and the connection type,
+so you can read off what to `ssh` to.
 
 | Metric | How it is measured | Where it comes from |
 |---|---|---|
