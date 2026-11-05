@@ -8,8 +8,8 @@ inside 1 GB of RAM and leave the link it is measuring alone.
 ```
 ● ONLINE  Internet (1.1.1.1)                                      3m  16:43:49
 ┌── PI HEALTH ────── OK ─┬── LATENCY ──────── OK ─┬── THROUGHPUT ───────────── OK ─┐
-│ pi@raspberrypi Ethernet│ 18.8 ms      Internet  │ 0.781 Mbps in          ↑ 0.621 │
-│ 192.168.1.50           │ avg 19.1 p95 42.7 …    │ cap 94↓ 11.8↑ NIC limit · 3h   │
+│ user@hostname Ethernet│ 18.8 ms      Internet  │ 0.781 Mbps in          ↑ 0.621 │
+│ 192.168.X.X           │ avg 19.1 p95 42.7 …    │ cap 94↓ 11.8↑ NIC limit · 3h   │
 │ 52 °C        up 3d 4h  │ ╭─╮                    │ ───╮                            │
 │ power OK · SD OK       │ ─╯ ╰──────────         │    ╰─────────                   │
 │ cpu      ██░░░░   12%  │   ▮  ▮▮      ▮ (loss)  │ in  ▌░░░░░░░░░ 0.8%            │
