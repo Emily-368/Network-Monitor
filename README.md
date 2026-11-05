@@ -15,9 +15,9 @@ raspberrypi · eth0                ● ONLINE                          3m  16:43
 │ ─╯ ╰──────────         │   ▌  █    ▌            │    ╰─────────                   │
 │   ▮  ▮▮      ▮ (loss)  │                        │ in  ▌░░░░░░░░░ 0.8%            │
 │                        │                        │ out ██░░░░░░░░ 5.3%            │
-├── JITTER ──┬── TCP ────┬── DNS ──────┬── LINK ─────────┬── AVAIL 24H ───────────┤
-│ 2.4 ms     │ 28.5 ms   │ 24 ms       │ 100 Mbps  0 /s  │ 99.974 %               │
-├── TARGETS ─────────────────────── Pi 52°C · power OK · cpu 12% · up 3d 4h ───────┤
+├── JITTER ─┬── TCP ───┬── DNS ───┬── LINK ───┬── AVAIL 24H ──┬── PI HEALTH ─────┤
+│ 2.4 ms    │ 28.5 ms  │ 24 ms    │ 100 Mbps  │ 99.974 %      │ 52 °C  power OK  │
+├── TARGETS ───────────────────────────────────────────────────────────────────────┤
 │ TARGET    HOST          NOW   AVG   P95   JIT  LOSS%    1H     24H  STATE        │
 │ Gateway   192.168.1.1   3.5   1.9   3.7   0.2      0   100  99.998  OK           │
 │ Internet  1.1.1.1      18.8  19.1  42.7   2.4   1.67 99.861 99.974  WARN         │
@@ -276,8 +276,8 @@ zero.
 | `ModuleNotFoundError: tkinter` | `sudo apt install python3-tk` (and the venv needs `--system-site-packages`) |
 | throughput always 0 | wrong interface — set `general.interface` to `eth0`/`wlan0` |
 | capacity test always fails | `pip install speedtest-cli`, or switch to `method: iperf3` |
-| `UNDER-VOLTAGE` or `power dipped` beside TARGETS | use a better power supply; it can cause network errors too |
-| no `power` text beside TARGETS | `vcgencmd` missing or not permitted — add the user to the `video` group |
+| `UNDER-VOLTAGE` or `power dipped` in the Pi health tile | use a better power supply; it can cause network errors too |
+| `power unknown` in the Pi health tile | `vcgencmd` missing or not permitted — add the user to the `video` group |
 | screen blanks after 10 min | `sudo raspi-config nonint do_blanking 1`, then reboot |
 | `bad interpreter` on a script | CRLF line endings — `dos2unix scripts/*.sh` |
 

@@ -8,9 +8,8 @@ Layout, for the 5" 800x480 DSI panel (DFRobot DFR0550-V2):
     +------------------+------------------+--------------------------+
     | LATENCY          | PACKET LOSS      | THROUGHPUT vs capacity   |
     +------------------+------------------+--------------------------+
-    | JITTER | TCP | DNS | LINK + errors | AVAILABILITY              |
+    | JITTER | TCP | DNS | LINK + errors | AVAILABILITY | PI HEALTH  |
     +----------------------------------------------------------------+
-    | TARGETS                                         Pi temp / power |
     | per-target table + latest event                                |
     +----------------------------------------------------------------+
 
@@ -178,14 +177,14 @@ class Dashboard:
         row2 = tk.Frame(outer, bg=T.PAGE)
         row2.grid(row=2, column=0, sticky="nsew", pady=4)
         row2.grid_rowconfigure(0, weight=1)
-        for col in range(5):
+        for col in range(6):
             row2.grid_columnconfigure(col, weight=1, uniform="s")
 
         def compact(col: int, title: str, unit: str, chart_color: str | None):
             tile = Tile(row2, th, title, unit=unit, compact=True,
                         hero_font=th.hero_xs)
             tile.grid(row=0, column=col, sticky="nsew",
-                      padx=(0 if col == 0 else 4, 0 if col == 4 else 0))
+                      padx=(0 if col == 0 else 4, 0))
             chart = None
             if chart_color:
                 chart = LineChart(tile.body, th, [(title, chart_color)],
@@ -198,6 +197,7 @@ class Dashboard:
         self.t_dns, self.c_dns = compact(2, "DNS", "ms", T.SERIES["yellow"])
         self.t_link, _ = compact(3, "Link", "Mbps", None)
         self.t_avail, _ = compact(4, "Avail 24h", "%", None)
+        self.t_pi, _ = compact(5, "Pi health", "°C", None)
 
         self.r_link_err = StatRow(self.t_link.body, th, "errors")
         self.r_link_err.pack(fill="x")
@@ -207,13 +207,14 @@ class Dashboard:
         self.r_avail_1h.pack(fill="x")
         self.r_avail_out = StatRow(self.t_avail.body, th, "outages 24h")
         self.r_avail_out.pack(fill="x")
+        self.r_pi_cpu = StatRow(self.t_pi.body, th, "cpu")
+        self.r_pi_cpu.pack(fill="x")
+        self.r_pi_up = StatRow(self.t_pi.body, th, "up")
+        self.r_pi_up.pack(fill="x")
 
         # -- table ------------------------------------------------------ #
         bottom = Panel(outer, th, "Targets")
         bottom.grid(row=3, column=0, sticky="nsew")
-        self.pi_lbl = tk.Label(bottom.head, text="", bg=T.PANEL, fg=T.INK2,
-                               font=th.title, anchor="e", bd=0, pady=0)
-        self.pi_lbl.pack(side="right")
         # Footer first, so a short panel eats into the table rather than
         # clipping the status line off the bottom of the screen.
         self.footer = tk.Label(bottom.body, text="", bg=T.PANEL, fg=T.MUTED,
@@ -356,7 +357,7 @@ class Dashboard:
         self._render_bandwidth(iface, bw, t0, t1, stale, spans)
         self._render_compact(primary, iface, tcp, snap, t0, t1, stale)
         self._render_table(snap)
-        self._render_pi(snap["system"])
+        self._render_pi(snap["system"], stale)
         self._render_footer(snap, tcp)
 
     def _render_header(self, snap) -> None:
@@ -529,7 +530,8 @@ class Dashboard:
                                  else T.level(dns["ms"], th.tcp_warn_ms, th.tcp_crit_ms),
                                  show_text=False)
             self.t_dns.set_value(fmt_ms(dns["ms"]),
-                                 sub=f"failed {dns['fails']} of {dns['attempts']}")
+                                 sub=f"failed {fmt_pct(100.0 * dns['fails'] / dns['attempts'])}%"
+                                 if dns["attempts"] else "")
             self.c_dns.draw([dns["ts"]], [dns["series"]], t0, t1,
                             y_floor=50.0, max_gap_s=self.gap_dns)
 
@@ -613,23 +615,22 @@ class Dashboard:
                 state,
             ], lv, primary=bool(t.get("primary")))
 
-    def _render_pi(self, system) -> None:
-        """Quiet while healthy; the colour only changes when the Pi is the problem."""
+    def _render_pi(self, system, stale) -> None:
         th = self.th
+        tile = self.t_pi
+        if stale:
+            tile.set_level("none")
+            tile.set_value("--")
+            return
+
         temp, cpu = system["temp_c"], system["cpu_pct"]
-        bits = []
-        if temp is not None:
-            bits.append(f"Pi {temp:.0f}°C")
-        if system["power_level"]:
-            bits.append(system["power_text"])
-        if cpu is not None:
-            bits.append(f"cpu {cpu:.0f}%")
-        if system["uptime_s"] is not None:
-            bits.append(f"up {fmt_duration(system['uptime_s'])}")
         lv = T.worst(T.level(temp, th.temp_warn_c, th.temp_crit_c),
                      system["power_level"] or "none")
-        set_label(self.pi_lbl, text="  ·  ".join(bits),
-                  fg=T.INK2 if lv in ("ok", "none") else T.status_color(lv))
+        tile.set_level(lv, show_text=False)
+        tile.set_value("--" if temp is None else f"{temp:.0f}",
+                       sub=system["power_text"] or "power unknown")
+        self.r_pi_cpu.set("--" if cpu is None else f"{cpu:.0f}%")
+        self.r_pi_up.set(fmt_duration(system["uptime_s"]))
 
     def _render_footer(self, snap, tcp) -> None:
         bits = []

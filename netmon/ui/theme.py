@@ -163,7 +163,7 @@ class Theme:
         # 12 px is under 2 mm tall: nothing that must be read goes below that.
         self.hero = (sans, px(36), "bold")
         self.hero_sm = (sans, px(23), "bold")
-        self.hero_xs = (sans, px(22), "bold")
+        self.hero_xs = (sans, px(20), "bold")
         self.unit = (sans, px(12), "normal")
         self.title = (sans, px(12), "bold")
         self.label = (sans, px(12), "normal")
