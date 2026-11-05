@@ -266,7 +266,7 @@ netmon/
     iface.py       throughput, errors, address, link state, Wi-Fi signal
     tcp.py         handshake time, retransmits
     dns.py         timed lookup through the system resolver
-    system.py      Pi temperature, under-voltage, throttling, CPU
+    system.py      Pi temperature, under-voltage, throttling, CPU, RAM utilisation, SD card wear estimate and state change to Read-Only 
     bandwidth.py   capacity (speedtest / iperf3), in a worker thread
   ui/
     theme.py       dark palette, status levels, fonts
