@@ -3,6 +3,17 @@
 The Pi 3B's Ethernet hangs off its USB bus, so a weak power supply can look exactly
 like a flaky link: dropped frames, loss, resets. Under-voltage is reported by the
 firmware, read here through ``vcgencmd get_throttled``.
+
+The SD card is watched too, since it is what wears out first on a Pi. Consumer
+cards keep their wear-levelling data inside their own controller and do not report
+it to Linux, so real wear cannot be read. What is reported instead:
+
+  * **written** - the total ext4 has written to the filesystem in its lifetime.
+    It is real, and it is kept on disk, so it survives reboots.
+  * **wear estimate** - that total, as a share of ``card size x sd_rated_cycles``.
+    An estimate only: it cannot see what the controller actually does.
+  * **errors and read-only** - ext4's error count, and whether the kernel has
+    remounted the card read-only. These are the signs of a card actually failing.
 """
 
 from __future__ import annotations
@@ -20,7 +31,7 @@ try:
 except ImportError:  # pragma: no cover
     HAVE_PSUTIL = False
 
-from ..util import host_uptime, read_cpu_temp
+from ..util import ext4_stats, host_uptime, read_cpu_temp, root_filesystem
 
 _VCGENCMD = shutil.which("vcgencmd")
 
@@ -53,7 +64,9 @@ class SystemProbe:
         self.state = state
         self.storage = storage
         self.interval = cfg.probes.system.interval
+        self.rated_cycles = cfg.probes.system.sd_rated_cycles
         self._undervolt = False
+        self._readonly = False
 
     async def _read_throttled(self) -> int | None:
         if not _VCGENCMD:
@@ -78,15 +91,48 @@ class SystemProbe:
         except (OSError, ValueError):
             return None
 
+    def _read_sd(self) -> dict:
+        try:
+            usage = shutil.disk_usage("/")
+        except OSError:
+            usage = None
+        device, readonly = root_filesystem()
+        stats = ext4_stats(device)
+        uptime = host_uptime()
+
+        out = {"used_pct": None, "free": None, "written": None, "per_day": None,
+               "wear": None, "errors": None, "readonly": readonly}
+        if usage and usage.total:
+            out["used_pct"] = 100.0 * (usage.total - usage.free) / usage.total
+            out["free"] = usage.free
+        if stats:
+            out["written"] = stats["lifetime_kb"] * 1024
+            out["errors"] = stats["errors"]
+            if uptime:
+                out["per_day"] = stats["session_kb"] * 1024 / uptime * 86400
+            if usage and usage.total:
+                out["wear"] = 100.0 * out["written"] / (usage.total * self.rated_cycles)
+        return out
+
     async def tick(self) -> None:
         bits = await self._read_throttled()
         cpu = psutil.cpu_percent(interval=None) if HAVE_PSUTIL else None
+        ram = psutil.virtual_memory().percent if HAVE_PSUTIL else None
+        sd = self._read_sd()
         level, text = describe_throttled(bits) if bits is not None else (None, "")
 
         with self.state.lock:
             st = self.state.system
             st.temp_c = read_cpu_temp()
             st.cpu_pct = cpu
+            st.ram_pct = ram
+            st.sd_used_pct = sd["used_pct"]
+            st.sd_free_bytes = sd["free"]
+            st.sd_written_bytes = sd["written"]
+            st.sd_written_per_day = sd["per_day"]
+            st.sd_wear_pct = sd["wear"]
+            st.sd_errors = sd["errors"]
+            st.sd_readonly = sd["readonly"]
             st.uptime_s = host_uptime()
             st.power_level = level
             st.power_text = text
@@ -100,3 +146,11 @@ class SystemProbe:
             self.storage.add_event(now, "power", "Pi", detail)
             log.warning("%s", detail)
         self._undervolt = undervolt
+
+        if sd["readonly"] and not self._readonly:
+            now = time.time()
+            detail = "SD card is read-only: it may be failing"
+            self.state.note_event(now, "disk", "Pi", detail)
+            self.storage.add_event(now, "disk", "Pi", detail)
+            log.warning("%s", detail)
+        self._readonly = sd["readonly"]

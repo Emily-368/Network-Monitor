@@ -6,15 +6,15 @@ Layout, for the 5" 800x480 DSI panel (DFRobot DFR0550-V2):
     | host/iface   | VERDICT (what is wrong and whose problem) | clock |
     | IP address   | detail                                    |       |
     +------------------+------------------+--------------------------+
-    | LATENCY          | PACKET LOSS      | THROUGHPUT vs capacity   |
+    | LATENCY          | PI HEALTH + SD   | THROUGHPUT vs capacity   |
     +------------------+------------------+--------------------------+
-    | JITTER | TCP | DNS | LINK + errors | AVAILABILITY | PI HEALTH  |
+    | JITTER | TCP | DNS | LINK + errors | AVAILABILITY | PACKET LOSS |
     +----------------------------------------------------------------+
     | per-target table + latest event                                |
     +----------------------------------------------------------------+
 
-The three real-time-sensitive metrics get the top row and the full chart width;
-the rest are compact readouts. Every charted value is also in the table, so the
+Latency and throughput get charts in the top row, beside the Pi's own health; the
+rest are compact readouts. Every charted value is also in the table, so the
 screen is readable when the TFT's viewing angle washes the colours out.
 
 Tap the header for the touch menu; tap anywhere else to change the time window.
@@ -56,11 +56,11 @@ def _fmt_window(seconds: int) -> str:
 def _human_bytes(n: int) -> str:
     if n <= 0:
         return "0B"
-    for unit in ("B", "K", "M", "G"):
-        if n < 1024 or unit == "G":
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024 or unit == "T":
             return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
         n /= 1024.0
-    return f"{n:.1f}G"
+    return f"{n:.1f}T"
 
 
 class Dashboard:
@@ -154,10 +154,18 @@ class Dashboard:
                                    [("rtt", T.SERIES["blue"])], height=60)
         self.c_latency.pack(fill="both", expand=True)
 
-        self.t_loss = Tile(prime, th, "Packet loss", unit="%")
-        self.t_loss.grid(row=0, column=1, sticky="nsew", padx=4)
-        self.c_loss = BarChart(self.t_loss.body, th, T.SERIES["blue"], height=60)
-        self.c_loss.pack(fill="both", expand=True)
+        self.t_pi = Tile(prime, th, "Pi health", unit="°C")
+        self.t_pi.grid(row=0, column=1, sticky="nsew", padx=4)
+        pi_color = T.SERIES["magenta"]
+        self.m_pi = CapacityMeter(
+            self.t_pi.body, th,
+            [("cpu", pi_color), ("ram", pi_color), ("sd", pi_color), ("wear est", pi_color)],
+            warn_pct=[90.0, self.th.ram_warn_pct, self.th.sd_used_warn_pct,
+                      self.th.sd_wear_warn_pct],
+            label_w=52, value_w=70)
+        self.m_pi.pack(fill="x")
+        self.r_pi_written = StatRow(self.t_pi.body, th, "SD written")
+        self.r_pi_written.pack(fill="x", padx=2, pady=(2, 0))
 
         self.t_bw = Tile(prime, th, "Throughput", unit="Mbps in")
         self.t_bw.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
@@ -197,7 +205,10 @@ class Dashboard:
         self.t_dns, self.c_dns = compact(2, "DNS", "ms", T.SERIES["yellow"])
         self.t_link, _ = compact(3, "Link", "Mbps", None)
         self.t_avail, _ = compact(4, "Avail 24h", "%", None)
-        self.t_pi, _ = compact(5, "Pi health", "°C", None)
+        self.t_loss, _ = compact(5, "Packet loss", "%", None)
+        self.c_loss = BarChart(self.t_loss.body, th, T.SERIES["blue"], height=26,
+                               show_axis=False)
+        self.c_loss.pack(fill="both", expand=True)
 
         self.r_link_err = StatRow(self.t_link.body, th, "errors")
         self.r_link_err.pack(fill="x")
@@ -207,10 +218,6 @@ class Dashboard:
         self.r_avail_1h.pack(fill="x")
         self.r_avail_out = StatRow(self.t_avail.body, th, "outages 24h")
         self.r_avail_out.pack(fill="x")
-        self.r_pi_cpu = StatRow(self.t_pi.body, th, "cpu")
-        self.r_pi_cpu.pack(fill="x")
-        self.r_pi_up = StatRow(self.t_pi.body, th, "up")
-        self.r_pi_up.pack(fill="x")
 
         # -- table ------------------------------------------------------ #
         bottom = Panel(outer, th, "Targets")
@@ -410,21 +417,19 @@ class Dashboard:
         tile = self.t_loss
         if stale or not p:
             tile.set_level("none")
-            tile.set_value("--", "collector not reporting")
+            tile.set_value("--")
             return
 
         loss = p.get("loss_pct")
         lv = T.level(loss, th.loss_warn_pct, th.loss_crit_pct)
-        tile.set_level(lv)
+        tile.set_level(lv, show_text=False)
         tile.set_value(
             fmt_pct(loss),
-            sub=(f"{p.get('loss_window_lost', 0)} of {p.get('loss_window_sent', 0)} "
-                 f"lost in {_fmt_window(self.window_s)}"),
-            aux="rolling 60s",
+            sub=f"{p.get('loss_window_lost', 0)} lost in {_fmt_window(self.window_s)}",
         )
         values = [l * 100.0 for l in p["lost_series"]]
         self.c_loss.draw(p["ts"], values, t0, t1, y_floor=max(1.0, th.loss_warn_pct),
-                         fmt=lambda v: f"{v:g}%", spans=spans)
+                         spans=spans)
 
     def _render_bandwidth(self, iface, bw, t0, t1, stale, spans) -> None:
         """Throughput (live, 1 Hz) against measured capacity (hourly)."""
@@ -623,14 +628,42 @@ class Dashboard:
             tile.set_value("--")
             return
 
-        temp, cpu = system["temp_c"], system["cpu_pct"]
-        lv = T.worst(T.level(temp, th.temp_warn_c, th.temp_crit_c),
-                     system["power_level"] or "none")
-        tile.set_level(lv, show_text=False)
+        temp, cpu, ram = system["temp_c"], system["cpu_pct"], system["ram_pct"]
+        used, wear = system["sd_used_pct"], system["sd_wear_pct"]
+        errors = system["sd_errors"]
+
+        # The signs of a card actually failing, as opposed to one merely wearing.
+        if system["sd_readonly"]:
+            sd_level, sd_text = "crit", "SD READ-ONLY"
+        elif errors:
+            sd_level, sd_text = "warn", f"SD {errors} errors"
+        else:
+            sd_level, sd_text = "none" if errors is None else "ok", "SD OK"
+
+        tile.set_level(T.worst(T.level(temp, th.temp_warn_c, th.temp_crit_c),
+                               system["power_level"] or "none",
+                               T.level(ram, th.ram_warn_pct, th.ram_crit_pct),
+                               T.level(used, th.sd_used_warn_pct, th.sd_used_crit_pct),
+                               T.level(wear, th.sd_wear_warn_pct, th.sd_wear_crit_pct),
+                               sd_level))
+        power = system["power_text"] or "power unknown"
         tile.set_value("--" if temp is None else f"{temp:.0f}",
-                       sub=system["power_text"] or "power unknown")
-        self.r_pi_cpu.set("--" if cpu is None else f"{cpu:.0f}%")
-        self.r_pi_up.set(fmt_duration(system["uptime_s"]))
+                       sub=power if errors is None and sd_level != "crit"
+                       else f"{power} · {sd_text}",
+                       aux=f"up {fmt_duration(system['uptime_s'])}"
+                       if system["uptime_s"] is not None else "")
+
+        def pct(value, digits=0):
+            return "--" if value is None else f"{value:.{digits}f}%"
+
+        free = system["sd_free_bytes"]
+        self.m_pi.draw([cpu, ram, used, wear],
+                       [pct(cpu), pct(ram),
+                        "--" if free is None else f"{_human_bytes(free)} free",
+                        pct(wear, 1)])
+        written, per_day = system["sd_written_bytes"], system["sd_written_per_day"]
+        self.r_pi_written.set("--" if written is None else
+                              f"{_human_bytes(written)}, {_human_bytes(per_day or 0)}/day")
 
     def _render_footer(self, snap, tcp) -> None:
         bits = []

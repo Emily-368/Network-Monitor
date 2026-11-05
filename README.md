@@ -8,19 +8,20 @@ inside 1 GB of RAM and leave the link it is measuring alone.
 ```
 raspberrypi · eth0                ● ONLINE                          3m  16:43:49
 192.168.1.50                  Internet (1.1.1.1)
-┌── LATENCY ──────── OK ─┬── PACKET LOSS ──── OK ─┬── THROUGHPUT ───────────── OK ─┐
-│ 18.8 ms      Internet  │ 1.67 %     rolling 60s │ 0.781 Mbps in          ↑ 0.621 │
-│ avg 19.1 p95 42.7 …    │ 9 of 179 lost in 3m    │ cap 94↓ 11.8↑ NIC limit · 3h   │
-│ ╭─╮                    │      ▌                 │ ───╮                            │
-│ ─╯ ╰──────────         │   ▌  █    ▌            │    ╰─────────                   │
-│   ▮  ▮▮      ▮ (loss)  │                        │ in  ▌░░░░░░░░░ 0.8%            │
-│                        │                        │ out ██░░░░░░░░ 5.3%            │
-├── JITTER ─┬── TCP ───┬── DNS ───┬── LINK ───┬── AVAIL 24H ──┬── PI HEALTH ─────┤
-│ 2.4 ms    │ 28.5 ms  │ 24 ms    │ 100 Mbps  │ 99.974 %      │ 52 °C  power OK  │
+┌── LATENCY ──────── OK ─┬── PI HEALTH ────── OK ─┬── THROUGHPUT ───────────── OK ─┐
+│ 18.8 ms      Internet  │ 52 °C        up 3d 4h  │ 0.781 Mbps in          ↑ 0.621 │
+│ avg 19.1 p95 42.7 …    │ power OK · SD OK       │ cap 94↓ 11.8↑ NIC limit · 3h   │
+│ ╭─╮                    │ cpu      ██░░░░   12%  │ ───╮                            │
+│ ─╯ ╰──────────         │ ram      ███░░░   38%  │    ╰─────────                   │
+│   ▮  ▮▮      ▮ (loss)  │ sd       ██░░░░ 21G free│ in  ▌░░░░░░░░░ 0.8%            │
+│                        │ wear est ▌░░░░░   0.4% │ out ██░░░░░░░░ 5.3%            │
+│                        │ SD written  64G, 1G/day│                                 │
+├── JITTER ─┬── TCP ───┬── DNS ───┬── LINK ───┬── AVAIL 24H ──┬── PACKET LOSS ───┤
+│ 2.4 ms    │ 28.5 ms  │ 24 ms    │ 100 Mbps  │ 99.974 %      │ 1.67 %   3 lost  │
 ├── TARGETS ───────────────────────────────────────────────────────────────────────┤
 │ TARGET    HOST          NOW   AVG   P95   JIT  LOSS%    1H     24H  STATE        │
 │ Gateway   192.168.1.1   3.5   1.9   3.7   0.2      0   100  99.998  OK           │
-│ Internet  1.1.1.1      18.8  19.1  42.7   2.4   1.67 99.861 99.974  WARN         │
+│ Internet  1.1.1.1      18.8  19.1  42.7   2.4   1.67 99.861 99.974  OK           │
 │ Google    8.8.8.8      30.9  30.3  53.6   4.0      0   100  99.998  OK           │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -86,7 +87,7 @@ broken as a consequence:
 
 ## What it measures, and why these definitions
 
-The three real-time-sensitive metrics get the top row and the full chart width.
+Latency and throughput get charts in the top row, beside the Pi's own health.
 
 | Metric | How it is measured | Where it comes from |
 |---|---|---|
@@ -101,7 +102,8 @@ The three real-time-sensitive metrics get the top row and the full chart width.
 | **Availability** | answered echoes ÷ sent echoes, over 1 h and 24 h | SQLite |
 | **Error rate** | `errin+errout+dropin+dropout` per second, and as a share of packets | `psutil` |
 | **Outages** | count over 24 h and the last one's length; survives restarts | SQLite |
-| **Pi health** | SoC temperature, under-voltage and throttling flags, CPU, uptime | sysfs, `vcgencmd`, `psutil` |
+| **Pi health** | SoC temperature, under-voltage and throttling flags, CPU, RAM, uptime | sysfs, `vcgencmd`, `psutil` |
+| **SD card** | free space, total written, estimated wear, filesystem errors, read-only state | `disk_usage`, `/sys/fs/ext4`, `/proc/mounts` |
 
 Three of these are routinely conflated, so to be explicit:
 
@@ -128,6 +130,14 @@ steady 200 ms RTT has high latency and near-zero jitter.
 **Loss is counted per round, not per window-average.** A burst where 2 of 5
 echoes come back is 40 % loss for that round, so partial loss is visible rather
 than smeared.
+
+**SD wear is an estimate.** Consumer SD cards keep their wear-levelling data inside
+their own controller and do not report it to Linux, so real wear cannot be read.
+`wear est` is the total ext4 has written to the card, as a share of `card size x
+probes.system.sd_rated_cycles`. It starts from when the filesystem was created, so
+it misses earlier use of the card, and the rating is only a rough allowance. Treat
+it as a trend. `SD READ-ONLY` and `SD ... errors` are the real warning signs: back
+the card up and replace it.
 
 **One lost echo is not an alarm.** At one echo a second over a 60-second window,
 a single lost echo is 1.67 %, so the warning starts at 2 % (two lost echoes).
@@ -285,6 +295,8 @@ zero.
 | throughput always 0 | wrong interface — set `general.interface` to `eth0`/`wlan0` |
 | capacity test always fails | `pip install speedtest-cli`, or switch to `method: iperf3` |
 | `UNDER-VOLTAGE` or `power dipped` in the Pi health tile | use a better power supply; it can cause network errors too |
+| `SD READ-ONLY` or `SD ... errors` in the Pi health tile | the card may be failing: back it up and replace it |
+| `SD written` shows `--` | the root filesystem is not ext4, so there is no write total to read |
 | `power unknown` in the Pi health tile | `vcgencmd` missing or not permitted — add the user to the `video` group |
 | screen blanks after 10 min | `sudo raspi-config nonint do_blanking 1`, then reboot |
 | `bad interpreter` on a script | CRLF line endings — `dos2unix scripts/*.sh` |

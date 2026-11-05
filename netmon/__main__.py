@@ -122,6 +122,10 @@ def _selftest(cfg) -> int:
     s = snap["system"]
     print(f"    the Pi       temp {s['temp_c'] if s['temp_c'] is not None else '--'} C"
           f"   {s['power_text'] or 'power unknown (no vcgencmd)'}")
+    print(f"    SD card      used {fmt_pct(s['sd_used_pct'], 1)} %"
+          f"   wear estimate {fmt_pct(s['sd_wear_pct'], 2)} %"
+          f"   errors {s['sd_errors'] if s['sd_errors'] is not None else '--'}"
+          f"{'   READ-ONLY' if s['sd_readonly'] else ''}")
 
     failed = [n for n, r in results.items() if not r.get("ok")]
     unreachable = [t["name"] for t in snap["targets"] if not t["alive"]]

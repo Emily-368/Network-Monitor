@@ -487,12 +487,16 @@ class CapacityMeter(tk.Canvas):
     LABEL_W = 24
 
     def __init__(self, master, theme: T.Theme, rows: list[tuple[str, str]],
-                 warn_pct: float = 70.0, **kw):
+                 warn_pct=70.0, label_w: int = LABEL_W, value_w: int = 54, **kw):
         super().__init__(master, bg=T.PANEL, highlightthickness=0, bd=0,
                          height=self.ROW_H * len(rows), **kw)
         self.theme = theme
         self.rows = rows
-        self.warn_pct = warn_pct
+        # One warning mark for every row, or a list with one per row.
+        self.warn_pcts = (warn_pct if isinstance(warn_pct, (list, tuple))
+                          else [warn_pct] * len(rows))
+        self.label_w = label_w
+        self.value_w = value_w
         self._cw = 0
         self._items = []
         for label, color in rows:
@@ -511,8 +515,8 @@ class CapacityMeter(tk.Canvas):
         w = self._cw or self.winfo_width()
         if w < 60:
             return
-        bar_x0 = self.LABEL_W
-        bar_x1 = max(bar_x0 + 20, w - 54)
+        bar_x0 = self.label_w
+        bar_x1 = max(bar_x0 + 20, w - self.value_w)
         bar_w = bar_x1 - bar_x0
 
         for i, item in enumerate(self._items):
@@ -525,7 +529,7 @@ class CapacityMeter(tk.Canvas):
             # Keep a 1 px sliver so a live-but-tiny flow never reads as zero.
             end = bar_x0 + max(1.0 if pct else 0.0, frac * bar_w)
             self.coords(item["fill"], bar_x0, top, end, bot)
-            tick_x = bar_x0 + bar_w * max(0.0, min(1.0, self.warn_pct / 100.0))
+            tick_x = bar_x0 + bar_w * max(0.0, min(1.0, self.warn_pcts[i] / 100.0))
             self.coords(item["tick"], tick_x, top - 2, tick_x, bot + 2)
             self.coords(item["value"], w - 2, y)
             text = texts[i] if i < len(texts) else "--"

@@ -13,6 +13,8 @@ import time
 # --------------------------------------------------------------------------- #
 
 _ROUTE_FILE = "/proc/net/route"
+_MOUNTS_FILE = "/proc/mounts"
+_EXT4_DIR = "/sys/fs/ext4"
 
 
 def default_route() -> tuple[str | None, str | None]:
@@ -136,6 +138,52 @@ def list_framebuffers() -> list[str]:
             continue
         out.append(f"{os.path.basename(path)} {name} {size}")
     return out
+
+
+def root_filesystem() -> tuple[str | None, bool]:
+    """Return ``(device name, read-only?)`` for /, such as ``("mmcblk0p2", False)``.
+
+    A card that is failing often gets remounted read-only by the kernel.
+    """
+    try:
+        with open(_MOUNTS_FILE, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return (None, False)
+    # The last entry for / is the one in effect.
+    for line in reversed(lines):
+        f = line.split()
+        if len(f) >= 4 and f[1] == "/" and f[0] != "rootfs":
+            return (os.path.basename(f[0]), "ro" in f[3].split(","))
+    return (None, False)
+
+
+def ext4_stats(device: str | None) -> dict | None:
+    """Write totals and error count that ext4 keeps for a filesystem.
+
+    ``lifetime_kb`` is stored on disk, so it survives reboots and counts every
+    write since the filesystem was created. ``None`` if / is not ext4.
+    """
+    names = [device] if device else []
+    try:
+        # The mount table can say /dev/root; with a single filesystem, that is it.
+        found = [n for n in os.listdir(_EXT4_DIR) if n != "features"]
+    except OSError:
+        return None
+    if not (device and device in found):
+        names = found if len(found) == 1 else []
+    for name in names:
+        try:
+            out = {}
+            for key, filename in (("lifetime_kb", "lifetime_write_kbytes"),
+                                  ("session_kb", "session_write_kbytes"),
+                                  ("errors", "errors_count")):
+                with open(f"{_EXT4_DIR}/{name}/{filename}", "r", encoding="ascii") as fh:
+                    out[key] = int(fh.read().strip())
+            return out
+        except (OSError, ValueError):
+            return None
+    return None
 
 
 def host_uptime() -> float | None:

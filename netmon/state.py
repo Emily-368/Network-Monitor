@@ -360,6 +360,14 @@ class SystemState:
     def __init__(self):
         self.temp_c: float | None = None
         self.cpu_pct: float | None = None
+        self.ram_pct: float | None = None
+        self.sd_used_pct: float | None = None
+        self.sd_free_bytes: int | None = None
+        self.sd_written_bytes: int | None = None    # lifetime, from ext4
+        self.sd_written_per_day: float | None = None    # bytes, averaged since boot
+        self.sd_wear_pct: float | None = None       # an estimate: see probes/system.py
+        self.sd_errors: int | None = None
+        self.sd_readonly: bool = False
         self.uptime_s: float | None = None
         self.power_level: str | None = None     # None off a Pi / without vcgencmd
         self.power_text: str = ""
@@ -368,6 +376,14 @@ class SystemState:
         return {
             "temp_c": self.temp_c,
             "cpu_pct": self.cpu_pct,
+            "ram_pct": self.ram_pct,
+            "sd_used_pct": self.sd_used_pct,
+            "sd_free_bytes": self.sd_free_bytes,
+            "sd_written_bytes": self.sd_written_bytes,
+            "sd_written_per_day": self.sd_written_per_day,
+            "sd_wear_pct": self.sd_wear_pct,
+            "sd_errors": self.sd_errors,
+            "sd_readonly": self.sd_readonly,
             "uptime_s": self.uptime_s,
             "power_level": self.power_level,
             "power_text": self.power_text,

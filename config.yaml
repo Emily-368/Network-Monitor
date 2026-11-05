@@ -49,7 +49,11 @@ probes:
     timeout: 3.0
 
   system:
-    interval: 10.0         # Pi temperature, under-voltage, CPU
+    interval: 10.0         # Pi temperature, power, CPU, RAM, SD card
+    # For the SD wear estimate: how many times the whole card can be rewritten.
+    # A rough allowance for a consumer card, including the card's own extra
+    # internal writes. Check your card's rating; high-endurance cards last longer.
+    sd_rated_cycles: 500
 
   bandwidth:
     enabled: true
@@ -100,3 +104,10 @@ thresholds:
   # Pi SoC temperature; the firmware starts throttling at 80 C.
   temp_warn_c: 70
   temp_crit_c: 80
+  ram_warn_pct: 85
+  ram_crit_pct: 95
+  # SD card: how full it is, and the estimated share of its write life used.
+  sd_used_warn_pct: 85
+  sd_used_crit_pct: 95
+  sd_wear_warn_pct: 70
+  sd_wear_crit_pct: 90

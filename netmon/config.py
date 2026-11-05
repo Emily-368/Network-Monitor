@@ -60,6 +60,7 @@ class DnsCfg:
 @dataclass
 class SystemCfg:
     interval: float = 10.0
+    sd_rated_cycles: int = 500
 
 
 @dataclass
@@ -126,6 +127,12 @@ class Thresholds:
     signal_crit_dbm: float = -80.0
     temp_warn_c: float = 70.0
     temp_crit_c: float = 80.0
+    ram_warn_pct: float = 85.0
+    ram_crit_pct: float = 95.0
+    sd_used_warn_pct: float = 85.0
+    sd_used_crit_pct: float = 95.0
+    sd_wear_warn_pct: float = 70.0
+    sd_wear_crit_pct: float = 90.0
 
 
 @dataclass
@@ -279,6 +286,7 @@ def load_config(explicit: str | None = None) -> Config:
     cfg.probes.tcp.interval = max(1.0, float(cfg.probes.tcp.interval))
     cfg.probes.dns.interval = max(5.0, float(cfg.probes.dns.interval))
     cfg.probes.system.interval = max(1.0, float(cfg.probes.system.interval))
+    cfg.probes.system.sd_rated_cycles = max(1, int(cfg.probes.system.sd_rated_cycles))
     cfg.probes.bandwidth.interval = max(60.0, float(cfg.probes.bandwidth.interval))
     cfg.general.raw_retention_hours = max(0.5, float(cfg.general.raw_retention_hours))
     cfg.general.history_points = max(60, int(cfg.general.history_points))
